@@ -35,6 +35,16 @@ export interface Config {
      */
     schema?: string;
 }
+/**
+ * 递归清除对象中所有字符串里的 U+0000 空字节。
+ *
+ * PostgreSQL jsonb 不允许 JSON 文本含 `\u0000` 转义（报 unsupported Unicode
+ * escape sequence）。空字节常来自知识库文档切片等上游文本，经 LLM 上下文
+ * 进入会话事件后会导致整条 append 写库失败、turn 直接报错。
+ * 必须在 JSON.stringify 之前对值清洗——对序列化后的文本做替换会误伤
+ * `\\u0000` 这种用户有意写入的合法转义。
+ */
+export declare function stripNullChars<T>(value: T): T;
 /** 写句柄的内部状态。 */
 interface WriteState {
     /** 下一个待写 seq（已提交日志长度）。 */

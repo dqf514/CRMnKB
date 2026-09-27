@@ -71,6 +71,26 @@ export interface Config {
 /** schema 名白名单校验（防 SQL 注入，schema 会拼进 SQL 文本）。 */
 const SCHEMA_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+/**
+ * 递归清除对象中所有字符串里的 U+0000 空字节。
+ *
+ * PostgreSQL jsonb 不允许 JSON 文本含 `\u0000` 转义（报 unsupported Unicode
+ * escape sequence）。空字节常来自知识库文档切片等上游文本，经 LLM 上下文
+ * 进入会话事件后会导致整条 append 写库失败、turn 直接报错。
+ * 必须在 JSON.stringify 之前对值清洗——对序列化后的文本做替换会误伤
+ * `\\u0000` 这种用户有意写入的合法转义。
+ */
+export function stripNullChars<T>(value: T): T {
+  if (typeof value === 'string') return value.replace(/\u0000/g, '') as T
+  if (Array.isArray(value)) return value.map(item => stripNullChars(item)) as T
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) out[key] = stripNullChars(item)
+    return out as T
+  }
+  return value
+}
+
 /** 写句柄的内部状态。 */
 interface WriteState {
   /** 下一个待写 seq（已提交日志长度）。 */
@@ -399,7 +419,7 @@ class PgSessionPersistence extends SessionPersistence {
       const inserted = await client.query(
         `INSERT INTO ${this.headersTable} (session_id, header, inherited_event_count, event_count)
          VALUES ($1, $2, $3, $4) ON CONFLICT (session_id) DO NOTHING`,
-        [header.id, JSON.stringify(header), inheritedEventCount, events.length])
+        [header.id, JSON.stringify(stripNullChars(header)), inheritedEventCount, events.length])
       if (inserted.rowCount === 0) {
         throw new SessionAlreadyExistsError(header.id)
       }
@@ -438,7 +458,7 @@ class PgSessionPersistence extends SessionPersistence {
     const values: unknown[] = []
     const tuples: string[] = []
     for (const [index, event] of events.entries()) {
-      values.push(id, event.seq, JSON.stringify(event))
+      values.push(id, event.seq, JSON.stringify(stripNullChars(event)))
       tuples.push(`($${index * 3 + 1}, $${index * 3 + 2}, $${index * 3 + 3})`)
     }
     await client.query(

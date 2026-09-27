@@ -139,4 +139,33 @@ describe('session-persistence-pg 专属行为', () => {
     ).rejects.toThrow(/非法 schema/)
     await ctx.fiber.dispose()
   })
+
+  it('事件文本含 U+0000 空字节：写库前清洗，读回为净化文本', async () => {
+    const schema = makeSchemaName()
+    const ctx = new Context()
+    try {
+      await ctx.plugin(PgSessionPersistence, { databaseUrl: DATABASE_URL, schema })
+      const m = meta('null-char-sanitize', '/work')
+      const writer = await ctx.sessionPersistence.create(m)
+      const events = oneTurnLog()
+      // 模拟上游文本（如知识库切片）带入的空字节：PG jsonb 会拒绝 \u0000 转义，
+      // 未清洗时 append 直接报 unsupported Unicode escape sequence。
+      const nul = String.fromCharCode(0)
+      const userMessage = events[1].data as { content: Array<{ type: string; text: string }> }
+      events[1] = {
+        ...events[1],
+        data: { ...userMessage, content: [{ type: 'text', text: `hi${nul}there` }] },
+      } as typeof events[1]
+      await writer.append(events)
+      const reader = await ctx.sessionPersistence.open(m.id, 'read')
+      const stored = await reader.read()
+      const storedMessage = stored.events[1].data as { content: Array<{ text: string }> }
+      expect(storedMessage.content[0].text).toBe('hithere')
+      await reader.close()
+      await writer.close()
+    } finally {
+      await ctx.fiber.dispose()
+      await dropSchema(schema)
+    }
+  })
 })
