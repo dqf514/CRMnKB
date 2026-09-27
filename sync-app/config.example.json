@@ -1,0 +1,8 @@
+{
+  "server_url": "http://10.1.30.37:8100",
+  "username": "admin",
+  "password": "",
+  "sync_dir": "D:/榜样知识库",
+  "poll_interval": 30,
+  "folder_id": null
+}

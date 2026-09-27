@@ -1,0 +1,23 @@
+# 榜样知识库后端 systemd 服务（裸机部署）
+# 安装：sudo cp crmnkb-backend.service /etc/systemd/system/ && sudo systemctl enable --now crmnkb-backend
+# 注意按实际路径/用户调整 WorkingDirectory、ExecStart、User
+# 监听 0.0.0.0：前端由独立的 nginx 发布服务器反向代理过来（记得用防火墙只放行 nginx 服务器的 IP）
+[Unit]
+Description=CRMnKB Backend (FastAPI + uvicorn)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=crmnkb
+Group=crmnkb
+WorkingDirectory=/opt/crmnkb/backend
+ExecStart=/opt/crmnkb/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8100 --workers 1
+Restart=always
+RestartSec=3
+# 上传/备份/品牌等资源目录写权限
+ReadWritePaths=/opt/crmnkb/backend/data
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

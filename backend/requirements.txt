@@ -1,0 +1,34 @@
+fastapi==0.115.*
+uvicorn[standard]==0.30.*
+sqlalchemy[asyncio]==2.0.*
+asyncpg==0.30.*
+pgvector==0.3.*
+pydantic==2.*
+pydantic-settings==2.*
+PyJWT==2.*
+pwdlib[bcrypt]==0.2.*
+httpx==0.28.*
+pypdf==5.*
+python-docx==1.1.*
+python-multipart==0.0.*
+pytest==8.*
+pytest-asyncio==0.26.*
+psutil==6.*
+openpyxl==3.1.*
+pymupdf==1.*
+playwright==1.*
+extract_msg==0.55.*
+xlrd==2.*
+python-pptx==1.*
+olefile==0.47.*  # 老 Office 二进制（.doc/.ppt）OLE 复合文档解析
+mcp>=1.8,<2
+# MCP 依赖的 sse-starlette 新版要求 starlette>=0.49，与 fastapi 0.115 不兼容；钉旧版
+sse-starlette<3
+# 可选：本地 OCR（RapidOCR，图片/扫描 PDF 三级递进中的"OCR"级）。
+# 未安装时自动回退视觉模型，不阻塞主流程；需系统装 opencv/onnxruntime 依赖
+rapidocr_onnxruntime
+# 可选：Tesseract OCR 兜底（需系统 apt install tesseract-ocr tesseract-ocr-chi-sim）
+pytesseract
+# dsh agent 基座（阶段 2 ACP 切换）：ACP v1 官方 Python 客户端，替代阶段 1 的
+# deepseek-harness-sdk（stdio JSON-RPC，vendor 目录保留但不再安装，见 Dockerfile 注释）
+agent-client-protocol==0.12.*

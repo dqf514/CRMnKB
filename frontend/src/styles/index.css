@@ -1,0 +1,130 @@
+/* 全局设计令牌与视觉语言 */
+:root {
+  --app-bg: #f4f6f9;
+  --app-surface: #ffffff;
+  --app-ink: #1f2937;
+  --app-ink-2: #6b7280;
+  --app-line: #e5e9f0;
+  --app-radius: 10px;
+  --app-radius-lg: 14px;
+  --app-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 16px rgba(16, 24, 40, 0.06);
+  --app-shadow-hover: 0 4px 8px rgba(16, 24, 40, 0.06), 0 12px 32px rgba(16, 24, 40, 0.1);
+  --app-header-h: 60px;
+  /* 次级令牌：卡片白/浅填充/三级文字/边框（Studio 等工作台组件在用，此前未定义导致不生效） */
+  --app-card: #ffffff;
+  --app-fill-1: #f0f3f8;
+  --app-ink-3: #9ca3af;
+  --app-border: var(--app-line);
+  /* Studio 浅色：左/右列比主区更深（侧栏） */
+  --studio-side-bg: #f8fafc;
+}
+
+html.dark {
+  --app-bg: #0f141b;
+  --app-surface: #171e29;
+  --app-ink: #e5e9f0;
+  --app-ink-2: #98a2b3;
+  --app-line: #2a3342;
+  --app-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.35);
+  --app-shadow-hover: 0 4px 8px rgba(0, 0, 0, 0.35), 0 12px 32px rgba(0, 0, 0, 0.45);
+  /* 暗色下的次级令牌 */
+  --app-card: #1d2532;
+  --app-fill-1: #1a2230;
+  --app-ink-3: #6b7280;
+  --app-border: var(--app-line);
+  /* Studio 暗色：左/右列比主区更深 */
+  --studio-side-bg: #131922;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--app-bg);
+  color: var(--app-ink);
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  /* 字号缩放：随 --app-font-scale（theme.js 设置）变化，不再用 html zoom */
+  font-size: calc(14px * var(--app-font-scale, 1));
+  -webkit-font-smoothing: antialiased;
+}
+
+body,
+.el-card,
+.el-menu,
+.el-drawer,
+.el-dialog,
+.el-popover {
+  transition: background-color 0.25s ease, border-color 0.25s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+/* 数字使用等宽数字，表格/统计更整齐 */
+.tnum,
+.el-table .cell {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 卡片统一语言 */
+.el-card {
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius-lg);
+  box-shadow: var(--app-shadow);
+}
+.el-card__header {
+  border-bottom: 1px solid var(--app-line);
+}
+
+/* 页面标题区 */
+.page-header {
+  margin-bottom: 16px;
+}
+.page-header .page-title-main {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  margin: 0;
+}
+.page-header .page-sub {
+  color: var(--app-ink-2);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+/* 弹窗/抽屉圆角 */
+.el-dialog {
+  border-radius: var(--app-radius-lg);
+}
+.el-drawer__header {
+  margin-bottom: 12px;
+  color: var(--app-ink);
+  font-weight: 600;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(120, 130, 150, 0.35);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 小屏通用：卡片内表格允许横向滚动而不破版 */
+.el-card__body {
+  min-width: 0;
+}
+.el-table {
+  width: 100%;
+}

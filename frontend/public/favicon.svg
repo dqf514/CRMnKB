@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="star" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#dbeafe"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <!-- 引领之星 -->
+  <path fill="url(#star)" d="M32 12.5
+    L37.6 25.4 L51.5 26.6
+    L40.9 35.7 L44 49.3
+    L32 41.8 L20 49.3
+    L23.1 35.7 L12.5 26.6
+    L26.4 25.4 Z"/>
+  <!-- 上扬基线，寓意成长 -->
+  <path d="M14 55 Q26 51 32 51 T50 47" stroke="#93c5fd" stroke-width="2.4" stroke-linecap="round" fill="none" opacity="0.9"/>
+</svg>

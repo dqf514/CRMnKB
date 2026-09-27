@@ -1,0 +1,592 @@
+"""知识库 MCP server（Streamable HTTP，dsh 基座实施方案阶段 1）。
+
+把现有 RAG 检索能力包装成 MCP 工具供 dsh 基座消费：
+- kb_search：混合检索（blend）+ Small2Big 扩展，返回当前用户可读的切片
+- kb_read_doc：读取整份文档的切片全文
+
+挂载点 /api/mcp（见 main.py）。鉴权方案：HTTP Authorization 头携带 dsh 专用
+JWT（aud=dsh-mcp，ACP 阶段由 acp_bridge 在每会话 session/new|resume 时新签，
+经 mcpServers headers 注入，不落盘）；选 header 而非
+"/api/mcp/{token}" 路径方案，因为项目安全约定禁止把令牌放进 URL（防访问日志
+窃取，见 api/deps.py 文件令牌注释），且 MCP streamable-http 规范本就走 header。
+
+信任边界：dsh 进程与 LLM 均不可信——令牌只授予知识库只读能力（其余业务接口
+拒绝 aud=dsh-mcp），ACL 在本模块工具实现内按 user_id 强制（复用 permissions 服务）。
+"""
+import logging
+from contextlib import asynccontextmanager
+from datetime import timezone
+
+import jwt
+from mcp.server.fastmcp import Context, FastMCP
+from sqlalchemy import func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import JSONResponse
+
+from app.config import settings
+from app.core.security import MCP_TOKEN_AUDIENCE, decode_token
+from app.database import AsyncSessionLocal
+from app.models.chunk import DocumentChunk
+from app.models.customer import Customer
+from app.models.document import KnowledgeDocument
+from app.models.follow_up import FollowUpRecord
+from app.models.knowledge_base import KnowledgeBase
+from app.models.opportunity import Opportunity
+from app.models.user import User
+from app.services.agent_approvals import create_approval
+from app.services.llm import resolve_embed_llm
+from app.services.permissions import accessible_ids, get_access, satisfies
+from app.services.rag import (
+    _find_block,
+    attach_file_info,
+    expand_contexts,
+    reciprocal_rank_fusion,
+    search_chunks_blend,
+    search_chunks_keyword,
+    search_chunks_vector,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class McpAuthError(Exception):
+    """MCP 令牌/账号校验失败（工具层收口为 MCP error 结果）。"""
+
+
+class McpToolError(Exception):
+    """工具业务错误（如文档不存在、无权限），向调用方返回 error 结果。"""
+
+
+# FastMCP server：serverName 在 dsh 侧 patch yml 里配置为 kb，
+# 工具以 mcp__kb__kb_search / mcp__kb__kb_read_doc 暴露给模型。
+# streamable_http_path 与挂载点一致（/api/mcp）：子应用经 starlette Route 直接
+# 挂进 FastAPI（不用 Mount——Mount 对 POST /api/mcp 会 307 到带尾斜杠路径，
+# MCP 客户端对 307 的兼容性不可靠），路径不重写，因此两边路径必须相同。
+kb_mcp = FastMCP(
+    "kb",
+    instructions=(
+        "企业内部知识库 + CRM（dsh 基座阶段 2）。只读工具：kb_search 混合检索切片、"
+        "kb_read_doc 读整份文档、kb_list 列出可读知识库、crm_search_customers 模糊检索客户、"
+        "crm_get_customer 客户详情。写工具（crm_add_followup / mail_draft_create）不直接生效，"
+        "只创建审批单，管理员批准后由系统自动执行。只能访问令牌所属用户有权限的资料。"
+    ),
+    streamable_http_path="/api/mcp",
+)
+
+
+def _unauthorized(detail: str) -> JSONResponse:
+    return JSONResponse({"detail": detail}, status_code=401)
+
+
+def decode_mcp_authorization(headers: list[tuple[bytes, bytes]]) -> dict:
+    """从 ASGI 头列表解析并校验 dsh MCP 令牌；失败抛 McpAuthError。纯函数（不起 DB）。"""
+    auth: str | None = None
+    for key, value in headers:
+        if key.lower() == b"authorization":
+            auth = value.decode("latin-1")
+            break
+    if not auth or not auth.startswith("Bearer "):
+        raise McpAuthError("未提供认证令牌")
+    try:
+        payload = decode_token(auth[len("Bearer "):].strip(), audience=MCP_TOKEN_AUDIENCE)
+        int(payload["sub"])
+    except (jwt.PyJWTError, KeyError, ValueError):
+        raise McpAuthError("令牌无效或已过期") from None
+    return payload
+
+
+class BearerMcpAuthMiddleware:
+    """纯 ASGI 中间件：/api/mcp 每个请求强制 dsh MCP 令牌，
+    通过则把 JWT payload 放进 scope["mcp.token_payload"] 供工具层解析用户。
+
+    不查库（初始化握手也要过这关，保持轻量）；账号态/改密失效在工具层
+    resolve_mcp_user 里按次校验。
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        try:
+            scope["mcp.token_payload"] = decode_mcp_authorization(scope.get("headers", []))
+        except McpAuthError as exc:
+            await _unauthorized(str(exc))(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+async def resolve_mcp_user(db: AsyncSession, payload: dict) -> User:
+    """由令牌 payload 解析用户并做账号态/改密失效校验（对齐 api/deps.py 的规则）。"""
+    user = await db.get(User, int(payload["sub"]))
+    if user is None:
+        raise McpAuthError("用户不存在")
+    if getattr(user, "status", 1) == 0:
+        raise McpAuthError("账号已停用")
+    changed_at = getattr(user, "password_changed_at", None)
+    iat = payload.get("iat")
+    if changed_at is not None and iat is not None:
+        if iat < changed_at.replace(tzinfo=timezone.utc).timestamp():
+            raise McpAuthError("令牌已失效，请重启 dsh 进程刷新令牌")
+    return user
+
+
+def _payload_from_ctx(ctx: Context) -> dict:
+    """从 FastMCP 上下文取当前 HTTP 请求里中间件放入的令牌 payload。"""
+    request = ctx.request_context.request if ctx is not None else None
+    payload = getattr(request, "scope", {}).get("mcp.token_payload") if request else None
+    if not payload:
+        raise McpAuthError("未通过 MCP 令牌校验")
+    return payload
+
+
+async def kb_search_impl(
+    db: AsyncSession, user: User, query: str, top_k: int = 5
+) -> list[dict]:
+    """混合检索当前用户可读范围内的切片（MCP 工具 kb_search 的实现，可独立测试）。
+
+    复用 rag.py 管线：blend 二阶段检索（失败回退 embedding+trgm RRF）→ Small2Big
+    扩展 → 文件信息回填。不做 LLM 问答、不做 rerank（dsh 侧 agent 自行判断相关性）。
+    """
+    top_k = max(1, min(int(top_k), 20))
+    # ACL：只检索用户可读的 KB（管理员为全部）
+    kb_ids = await accessible_ids(db, user, "kb")
+    if not kb_ids:
+        return []
+    embed_llm = await resolve_embed_llm(caller="mcp", tenant_id=user.tenant_id)
+    query_vec = (await embed_llm.embed([query]))[0]
+    try:
+        hits = await search_chunks_blend(
+            db, user.tenant_id, query_vec, query, top_k,
+            settings.RAG_SCORE_THRESHOLD, kb_ids, None,
+        )
+    except Exception as exc:
+        logger.warning("blend 检索失败，回退 embedding+trgm: %s", exc)
+        hits = []
+    if not hits:
+        vector_rows = await search_chunks_vector(db, user.tenant_id, query_vec, top_k * 2, kb_ids, None)
+        if settings.RAG_HYBRID:
+            keyword_rows = await search_chunks_keyword(db, user.tenant_id, query, top_k * 2, kb_ids, None)
+            hits = reciprocal_rank_fusion(vector_rows, keyword_rows)[:top_k]
+        else:
+            hits = vector_rows[:top_k]
+    if not hits:
+        return []
+    blocks = await expand_contexts(db, user.tenant_id, hits, settings.RAG_NEIGHBOR_WINDOW)
+    # 检索行不直接带 kb_id，补一张 doc_id → kb_id 映射
+    doc_ids = {h["doc_id"] for h in hits}
+    rows = (
+        await db.execute(
+            select(KnowledgeDocument.id, KnowledgeDocument.kb_id).where(
+                KnowledgeDocument.id.in_(doc_ids)
+            )
+        )
+    ).all()
+    kb_map = {r.id: r.kb_id for r in rows}
+    results = []
+    for h in hits:
+        block = _find_block(blocks, h)
+        results.append(
+            {
+                "chunk_id": h["chunk_id"],
+                "doc_id": h["doc_id"],
+                "kb_id": kb_map.get(h["doc_id"]),
+                "doc_title": h["doc_title"],
+                "score": round(float(h["score"]), 4),
+                # Small2Big 扩展后的上下文块（无扩展块时退回命中切片原文）
+                "content": block["content"] if block else h["content"],
+            }
+        )
+    await attach_file_info(db, results)
+    return results
+
+
+async def kb_read_doc_impl(
+    db: AsyncSession, user: User, doc_id: int, max_chars: int = 8000
+) -> dict:
+    """读取整份文档的切片全文（MCP 工具 kb_read_doc 的实现，可独立测试）。
+
+    ACL 与 RAG 检索口径一致：按文档所属 KB 的可读权限判断（管理员放行）。
+    """
+    max_chars = max(200, min(int(max_chars), 100000))
+    doc = await db.get(KnowledgeDocument, int(doc_id))
+    if doc is None or doc.tenant_id != user.tenant_id:
+        raise McpToolError("文档不存在")
+    if user.role != "admin":
+        perm = await get_access(db, user.tenant_id, user.id, "kb", doc.kb_id) if doc.kb_id else None
+        if not satisfies(perm, "read"):
+            raise McpToolError("没有该文档的访问权限")
+    rows = (
+        await db.execute(
+            select(DocumentChunk.chunk_index, DocumentChunk.content)
+            .where(
+                DocumentChunk.document_id == doc.id,
+                DocumentChunk.tenant_id == user.tenant_id,
+            )
+            .order_by(DocumentChunk.chunk_index)
+        )
+    ).all()
+    full = "\n".join(r.content for r in rows)
+    return {
+        "doc_id": doc.id,
+        "kb_id": doc.kb_id,
+        "title": doc.title,
+        "status": doc.status,
+        "chunk_count": len(rows),
+        "total_chars": len(full),
+        "truncated": len(full) > max_chars,
+        "content": full[:max_chars],
+    }
+
+
+@kb_mcp.tool(
+    name="kb_search",
+    description="在企业知识库中检索与问题相关的文档切片，返回 doc_id、标题、内容、相关度与文件信息。只能检索当前用户有权限的资料。",
+)
+async def _kb_search_tool(query: str, top_k: int = 5, ctx: Context = None) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await kb_search_impl(db, user, query, top_k)
+
+
+@kb_mcp.tool(
+    name="kb_read_doc",
+    description="按 doc_id 读取知识库文档的完整内容（按切片序号拼接），超长时按 max_chars 截断。需当前用户对该文档所属知识库有读权限。",
+)
+async def _kb_read_doc_tool(doc_id: int, max_chars: int = 8000, ctx: Context = None) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await kb_read_doc_impl(db, user, doc_id, max_chars)
+
+
+# ---------------------------------------------------------------------------
+# 阶段 2：知识库发现 + CRM 只读工具 + 审批制写工具
+#
+# CRM 权限口径：CRM 数据（customers/follow_up_records/opportunities）没有内容级
+# ACL——permissions 服务只管 kb/file/folder/notebook 四类资源；CRM 是租户内全员
+# 可见（与 /customers 等 REST 端点口径一致），因此 CRM 工具只按 tenant_id 隔离、
+# 排除软删，不再做逐条权限过滤。
+# ---------------------------------------------------------------------------
+
+
+async def kb_list_impl(db: AsyncSession, user: User) -> list[dict]:
+    """当前用户可读知识库列表（MCP 工具 kb_list 的实现，可独立测试）。
+
+    ACL 口径与 kb_search 一致（accessible_ids），帮 agent 发现检索范围。
+    """
+    kb_ids = await accessible_ids(db, user, "kb")
+    if not kb_ids:
+        return []
+    kbs = (
+        (
+            await db.execute(
+                select(KnowledgeBase)
+                .where(
+                    KnowledgeBase.id.in_(kb_ids),
+                    KnowledgeBase.tenant_id == user.tenant_id,
+                    KnowledgeBase.deleted_at.is_(None),
+                )
+                .order_by(KnowledgeBase.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not kbs:
+        return []
+    count_rows = (
+        await db.execute(
+            select(KnowledgeDocument.kb_id, func.count(KnowledgeDocument.id))
+            .where(
+                KnowledgeDocument.tenant_id == user.tenant_id,
+                KnowledgeDocument.kb_id.in_([k.id for k in kbs]),
+            )
+            .group_by(KnowledgeDocument.kb_id)
+        )
+    ).all()
+    counts = {r[0]: r[1] for r in count_rows}
+    return [
+        {
+            "kb_id": kb.id,
+            "name": kb.name,
+            "type": kb.type,
+            "doc_count": int(counts.get(kb.id, 0)),
+        }
+        for kb in kbs
+    ]
+
+
+def _customer_summary(c: Customer) -> dict:
+    return {
+        "customer_id": c.id,
+        "name": c.name,
+        "company": c.company,
+        "position": c.position,
+        "phone": c.phone,
+        "email": c.email,
+        "status": c.status,
+        "industries": c.industries or [],
+        "tags": c.tags or [],
+    }
+
+
+async def crm_search_customers_impl(
+    db: AsyncSession, user: User, query: str, limit: int = 10
+) -> list[dict]:
+    """按名称/公司/职务/电话/邮箱模糊 + 行业包含检索客户（crm_search_customers 的实现）。"""
+    query = (query or "").strip()
+    if not query:
+        return []
+    limit = max(1, min(int(limit), 50))
+    like = f"%{query}%"
+    stmt = (
+        select(Customer)
+        .where(
+            Customer.tenant_id == user.tenant_id,
+            Customer.deleted_at.is_(None),
+            or_(
+                Customer.name.like(like),
+                Customer.company.like(like),
+                Customer.position.like(like),
+                Customer.phone.like(like),
+                Customer.email.like(like),
+                # JSONB ? 操作符：industries 数组包含该行业名称即命中（同 /customers 列表）
+                Customer.industries.has_key(query),  # noqa: W601
+            ),
+        )
+        .order_by(Customer.created_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).scalars().all()
+    return [_customer_summary(c) for c in rows]
+
+
+async def crm_get_customer_impl(db: AsyncSession, user: User, customer_id: int) -> dict:
+    """客户详情 + 最近 10 条跟进 + 进行中商机概要（crm_get_customer 的实现）。"""
+    customer = await db.get(Customer, int(customer_id))
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise McpToolError("客户不存在")
+    followups = (
+        (
+            await db.execute(
+                select(FollowUpRecord)
+                .where(FollowUpRecord.customer_id == customer.id)
+                .order_by(FollowUpRecord.created_at.desc())
+                .limit(10)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    # 进行中 = 非赢单/输单（阶段枚举见前端 opportunityStageMap）
+    opportunities = (
+        (
+            await db.execute(
+                select(Opportunity)
+                .where(
+                    Opportunity.customer_id == customer.id,
+                    Opportunity.stage.not_in(("closed_won", "closed_lost")),
+                )
+                .order_by(Opportunity.updated_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    result = _customer_summary(customer)
+    result.update(
+        {
+            "wechat": customer.wechat,
+            "address": customer.address,
+            "source": customer.source,
+            "birthday": customer.birthday.isoformat() if customer.birthday else None,
+            "profile": customer.profile,
+            "recent_followups": [
+                {
+                    "id": f.id,
+                    "type": f.type,
+                    "content": f.content,
+                    "ai_summary": f.ai_summary,
+                    "created_at": f.created_at.isoformat() if f.created_at else None,
+                }
+                for f in followups
+            ],
+            "open_opportunities": [
+                {
+                    "id": o.id,
+                    "name": o.name,
+                    "amount": float(o.amount or 0),
+                    "stage": o.stage,
+                    "probability": o.probability,
+                    "expected_close_date": (
+                        o.expected_close_date.isoformat() if o.expected_close_date else None
+                    ),
+                }
+                for o in opportunities
+            ],
+        }
+    )
+    return result
+
+
+async def crm_add_followup_impl(
+    db: AsyncSession, user: User, customer_id: int, content: str, next_plan: str = ""
+) -> dict:
+    """申请新增跟进记录（crm_add_followup 的实现）。
+
+    不直接写库：只创建审批单（summary 含客户名与内容摘要），admin 批准后由
+    services/agent_approvals 的执行器写入 FollowUpRecord。
+    """
+    customer = await db.get(Customer, int(customer_id))
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise McpToolError("客户不存在")
+    content = (content or "").strip()
+    if not content:
+        raise McpToolError("跟进内容为空")
+    brief = content[:80] + ("…" if len(content) > 80 else "")
+    summary = f"客户「{customer.name}」新增跟进：{brief}"
+    if next_plan:
+        summary += f"；下一步计划：{next_plan[:50]}"
+    approval = await create_approval(
+        db, user, "crm_add_followup",
+        {"customer_id": customer.id, "content": content, "next_plan": next_plan or ""},
+        summary,
+    )
+    # 工具使用独立 session（不经 get_db），必须自行提交，审批人才能立即看到
+    await db.commit()
+    return {
+        "status": "pending_approval",
+        "approval_id": approval.id,
+        "message": "已提交审批，管理员批准后自动写入跟进记录",
+    }
+
+
+async def mail_draft_create_impl(
+    db: AsyncSession, user: User, customer_id: int | None,
+    to: str, subject: str, body: str,
+) -> dict:
+    """申请发送邮件（mail_draft_create 的实现）。
+
+    不直接发送：只创建审批单（summary 含收件人与主题），admin 批准后由执行器
+    经 app/services/email.py 的 SMTP 链路发出（SMTP 未配置时执行落 failed）。
+    """
+    to = (to or "").strip()
+    subject = (subject or "").strip()
+    if not to or not subject:
+        raise McpToolError("收件人与主题不能为空")
+    name: str | None = None
+    if customer_id is not None:
+        customer = await db.get(Customer, int(customer_id))
+        if (
+            customer is None
+            or customer.tenant_id != user.tenant_id
+            or customer.deleted_at is not None
+        ):
+            raise McpToolError("客户不存在")
+        name = customer.name
+    summary = f"发送邮件给 {to}"
+    if name:
+        summary += f"（客户「{name}」）"
+    summary += f"，主题「{subject}」"
+    approval = await create_approval(
+        db, user, "mail_draft_create",
+        {
+            "customer_id": customer_id,
+            "to": to,
+            "subject": subject,
+            "body": body or "",
+        },
+        summary,
+    )
+    await db.commit()
+    return {
+        "status": "pending_approval",
+        "approval_id": approval.id,
+        "message": "已提交审批，管理员批准后自动发送邮件",
+    }
+
+
+@kb_mcp.tool(
+    name="kb_list",
+    description="列出当前用户可读的知识库（kb_id、名称、类型、文档数），用于发现可检索范围。",
+)
+async def _kb_list_tool(ctx: Context = None) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await kb_list_impl(db, user)
+
+
+@kb_mcp.tool(
+    name="crm_search_customers",
+    description="按名称/公司/职务/电话/邮箱/行业模糊检索客户，返回客户概要列表（租户内全员可见）。",
+)
+async def _crm_search_customers_tool(
+    query: str, limit: int = 10, ctx: Context = None
+) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_search_customers_impl(db, user, query, limit)
+
+
+@kb_mcp.tool(
+    name="crm_get_customer",
+    description="按 customer_id 获取客户详情，含最近 10 条跟进记录与进行中的商机概要。",
+)
+async def _crm_get_customer_tool(customer_id: int, ctx: Context = None) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_get_customer_impl(db, user, customer_id)
+
+
+@kb_mcp.tool(
+    name="crm_add_followup",
+    description=(
+        "为客户申请新增跟进记录（写操作）。本工具不直接写库，只创建审批单；"
+        "管理员批准后系统自动写入。返回 approval_id 供跟踪审批结果。"
+    ),
+)
+async def _crm_add_followup_tool(
+    customer_id: int, content: str, next_plan: str = "", ctx: Context = None
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_add_followup_impl(db, user, customer_id, content, next_plan)
+
+
+@kb_mcp.tool(
+    name="mail_draft_create",
+    description=(
+        "申请向客户发送邮件（写操作）。本工具不直接发送，只创建审批单；"
+        "管理员批准后系统经 SMTP 自动发出。customer_id 可空（仅用于审批摘要关联客户）。"
+    ),
+)
+async def _mail_draft_create_tool(
+    customer_id: int | None, to: str, subject: str, body: str, ctx: Context = None
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await mail_draft_create_impl(db, user, customer_id, to, subject, body)
+
+
+def build_mcp_asgi_app():
+    """构造挂载到 FastAPI /api/mcp 的 ASGI 应用（FastMCP streamable-http + 令牌中间件）。"""
+    return BearerMcpAuthMiddleware(kb_mcp.streamable_http_app())
+
+
+@asynccontextmanager
+async def session_manager_lifespan():
+    """StreamableHTTP session manager 的 task group 需要在 FastAPI lifespan 内运行
+    （mcp>=1.8 要求，否则处理请求时抛 RuntimeError）。须先于本函数调用
+    build_mcp_asgi_app()（session manager 在那里懒创建）。"""
+    async with kb_mcp.session_manager.run():
+        yield

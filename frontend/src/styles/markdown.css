@@ -1,0 +1,94 @@
+/* markdown 渲染基础样式（全局，供各页面 v-html 的 .markdown-body 使用） */
+.markdown-body {
+  line-height: 1.75;
+  word-break: break-word;
+}
+.markdown-body p {
+  margin: 6px 0;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+  margin: 14px 0 6px;
+  line-height: 1.4;
+}
+.markdown-body h1 { font-size: 19px; }
+.markdown-body h2 { font-size: 17px; }
+.markdown-body h3 { font-size: 15px; }
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 20px;
+  margin: 6px 0;
+}
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 10px 0;
+  display: block;
+  overflow-x: auto;
+}
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid var(--app-line);
+  padding: 6px 10px;
+  text-align: left;
+  font-size: 13px;
+}
+.markdown-body th {
+  background: var(--app-surface);
+}
+.markdown-body code {
+  background: var(--app-surface);
+  border: 1px solid var(--app-line);
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 13px;
+}
+.markdown-body pre.hljs {
+  padding: 12px 14px;
+  border-radius: 10px;
+  overflow-x: auto;
+  margin: 10px 0;
+  border: 1px solid var(--app-line);
+}
+.markdown-body pre.hljs code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.markdown-body blockquote {
+  margin: 8px 0;
+  padding: 4px 12px;
+  border-left: 3px solid var(--el-color-primary-light-5);
+  color: var(--app-ink-2);
+}
+
+/* 暗色模式下的 highlight.js token 覆盖（亮色用 github.css） */
+html.dark .markdown-body pre.hljs {
+  background: #10151d;
+  color: #c9d4e3;
+}
+html.dark .hljs-comment,
+html.dark .hljs-quote { color: #7d8aa0; }
+html.dark .hljs-keyword,
+html.dark .hljs-selector-tag,
+html.dark .hljs-doctag { color: #ff7b93; }
+html.dark .hljs-string,
+html.dark .hljs-regexp,
+html.dark .hljs-addition { color: #8fd6a0; }
+html.dark .hljs-number,
+html.dark .hljs-literal { color: #f5a97f; }
+html.dark .hljs-title,
+html.dark .hljs-title.function_ { color: #82aaff; }
+html.dark .hljs-title.class_,
+html.dark .hljs-type { color: #f2d57e; }
+html.dark .hljs-attr,
+html.dark .hljs-attribute,
+html.dark .hljs-variable,
+html.dark .hljs-template-variable { color: #c792ea; }
+html.dark .hljs-built_in { color: #89ddff; }
+html.dark .hljs-meta { color: #7d8aa0; }
+html.dark .hljs-deletion { color: #ff7b93; }

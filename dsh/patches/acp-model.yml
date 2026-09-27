@@ -1,0 +1,16 @@
+# ACP 冒烟：进程级静态模型 patch（llm-pi-ai 路由 + acp 默认 provider/model）
+- id: llm-pi-ai
+  config:
+    providers:
+      kbcrm:
+        displayName: CRMnKB 模型
+        api: openai-completions
+        baseURL: !!js "process.env.DEEPSEEK_BASE_URL ?? ''"
+        apiKeyEnv: DEEPSEEK_API_KEY
+        models:
+          - id: "kimi-k2.6"
+            contextWindow: 131072
+- id: acp
+  config:
+    provider: kbcrm
+    model: kimi-k2.6

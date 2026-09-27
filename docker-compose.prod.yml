@@ -1,0 +1,61 @@
+# 生产部署：PostgreSQL(pgvector) + 后端 + 前端(nginx) 一键编排
+# 用法：docker compose -f docker-compose.prod.yml up -d --build
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: crmnkb-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: crm
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在环境变量或 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: crmnkb
+    # 不对外暴露 5432，仅容器网络内访问
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm -d crmnkb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    container_name: crmnkb-backend
+    restart: unless-stopped
+    env_file:
+      # 可选：没有 .env 时也能启动（全部走 config.py 默认值，模型后在管理端配置）
+      - path: ./backend/.env
+        required: false
+    environment:
+      # 覆盖 .env 中的 localhost，指向容器网络内的 postgres
+      DATABASE_URL: postgresql+asyncpg://crm:${POSTGRES_PASSWORD}@postgres:5432/crmnkb
+      # dsh agent 基座（阶段 2 ACP）：镜像内置 Node + @deepseek-ai/dsh + PG 持久化插件。
+      # 单租户单 ACP 进程；模型路由由进程级 patch（acp-model.yml）按 DB 默认 chat
+      # 模型自动生成（llm-pi-ai kbcrm 路由），DSH_PROVIDER 已弃用无需配置。
+      DSH_AGENT_ENABLED: "true"
+      DSH_BIN: /opt/dsh-runtime/node_modules/.bin/dsh
+      # dsh 会话持久化插件的 PG 连接串（patch yml 里 !!js 读进程环境变量）
+      DSH_PG_URL: postgresql://crm:${POSTGRES_PASSWORD}@postgres:5432/crmnkb
+      # DSH_HOME / DSH_PATCHES_DIR / DSH_WORKSPACE_ROOT 用默认值（/app/data/dsh/*），
+      # 由下方 dsh-home volume 持久化；DSH_MCP_URL 保持默认 http://127.0.0.1:8100/api/mcp
+    volumes:
+      - uploads:/app/data/uploads
+      # dsh 运行时状态：acp profile（含插件注册）、进程级 patch yml、agent 工作区
+      - dsh-home:/app/data/dsh
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    container_name: crmnkb-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:
+  dsh-home:

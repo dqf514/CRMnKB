@@ -1,0 +1,23 @@
+# 把默认的 JSONL 会话持久化后端替换为 PostgreSQL 后端。
+# patch 语义（vendor/include/src/index.ts）：patch 行不允许改已有行的 name，
+# 因此替换 = 禁用原行 + insert 新行。两层 patch 按顺序叠加，last write wins。
+#
+# 用法（二选一）：
+#   1) dsh --profile <name> --patch 本文件路径
+#   2) Python SDK：DeepSeekHarnessConfig(patches=("本文件路径",), ...)
+# 前提：@kbcrm/dsh-session-persistence-pg 已安装进该 profile
+#   dsh plugin --profile <name> add /d/AI/CRMnKB/dsh/session-persistence-pg
+
+# 1. 停用默认的 JSONL 后端。
+- id: session-persistence-jsonl
+  disabled: true
+
+# 2. 插入 PostgreSQL 后端（提供同一个 ctx.sessionPersistence 服务）。
+- insert:
+    - id: session-persistence-pg
+      name: '@kbcrm/dsh-session-persistence-pg'
+      config:
+        # 连接串支持 !!js 读环境变量；生产建议用 DSH_PG_URL 注入，不要把口令写进文件。
+        databaseUrl: !!js process.env.DSH_PG_URL ?? 'postgresql://crm:crm123@localhost:5433/crmnkb'
+        # 可选：表所在 schema（默认 public）。表名固定 dsh_ 前缀。
+        # schema: public

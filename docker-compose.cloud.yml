@@ -1,0 +1,39 @@
+# 云端生产部署：PostgreSQL 在独立服务器（自购服务器或云 RDS），本编排只起 后端 + 前端(nginx)
+# 前置：根目录 .env 配置 DATABASE_URL 指向 PG 服务器 + JWT_SECRET（ENV=prod）
+# 用法：docker compose -f docker-compose.cloud.yml up -d --build
+services:
+  backend:
+    build: ./backend
+    container_name: crmnkb-backend
+    restart: unless-stopped
+    env_file:
+      - path: ./backend/.env
+        required: false
+    environment:
+      # 数据库指向独立 PG 服务器（内网 IP 优先，走公网需确认 PG 开了 SSL/安全组）
+      DATABASE_URL: ${DATABASE_URL:?请在根目录 .env 设置 DATABASE_URL，例如 postgresql+asyncpg://crm:密码@10.0.0.2:5432/crmnkb}
+      ENV: prod
+      JWT_SECRET: ${JWT_SECRET:?请在根目录 .env 设置 JWT_SECRET（openssl rand -hex 32）}
+      # 远程 PG：备份用容器内 pg_dump 走网络（不要用 docker exec）
+      PG_DOCKER_CONTAINER: ""
+    volumes:
+      # 上传文件 / 品牌 logo / 备份 / 同步客户端安装包 分开持久化（勿整目录挂载，会覆盖镜像内的 playwright 浏览器）
+      - uploads:/app/data/uploads
+      - brand:/app/data/brand
+      - backups:/app/data/backups
+      - syncapp:/app/data/sync_app
+
+  web:
+    build: ./frontend
+    container_name: crmnkb-web
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+
+volumes:
+  uploads:
+  brand:
+  backups:
+  syncapp:

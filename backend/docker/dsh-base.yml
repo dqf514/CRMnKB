@@ -1,0 +1,14 @@
+# dsh 基础 patch（静态，随 dsh ACP 进程启动经 --patch 加载）。
+# 生产镜像母版：容器首启动时由 docker-entrypoint.sh 播种到 $DSH_PATCHES_DIR/base.yml
+# （开发机上的等价文件是 backend/data/dsh/patches/base.yml，默认库为 localhost:5433）。
+# 作用：禁用官方 JSONL 文件会话后端，换成 PG 会话持久化后端
+# （插件 @kbcrm/dsh-session-persistence-pg，entrypoint 已注册进 acp profile）。
+# databaseUrl 默认指向 compose 网络内的 postgres 服务；
+# 生产密码经 DSH_PG_URL 环境变量覆盖（!!js 表达式在 dsh 进程内求值）。
+- id: session-persistence-jsonl
+  disabled: true
+- insert:
+    - id: session-persistence-pg
+      name: '@kbcrm/dsh-session-persistence-pg'
+      config:
+        databaseUrl: !!js process.env.DSH_PG_URL ?? 'postgresql://crm:crm123@postgres:5432/crmnkb'

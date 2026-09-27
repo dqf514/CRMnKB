@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>知识库</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="alternate icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <script>
+      // 免闪烁：首屏渲染前应用持久化主题（品牌名由 brand store 加载后更新 document.title）
+      (function () {
+        try {
+          var t = JSON.parse(localStorage.getItem('crm-theme') || '{}')
+          var mode = t.mode === 'dark' ? 'dark' : 'light'
+          var accents = { blue: '#2563eb', green: '#059669', purple: '#7c3aed', orange: '#d97706', red: '#dc2626' }
+          var primary = accents[t.accent] || accents.blue
+          document.documentElement.classList.toggle('dark', mode === 'dark')
+          document.documentElement.style.setProperty('--el-color-primary', primary)
+          // 字号：字体缩放变量（与 theme store 一致；不用 zoom，会破坏弹出层定位）
+          var scale = { small: 1, medium: 1.1, large: 1.2 }[t.fontSize] || 1
+          document.documentElement.style.setProperty('--app-font-scale', String(scale))
+          document.documentElement.style.setProperty('--el-font-size-base', (14 * scale) + 'px')
+        } catch (e) { /* 忽略 */ }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

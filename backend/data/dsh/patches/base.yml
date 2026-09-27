@@ -1,0 +1,12 @@
+# dsh 基础 patch（静态，ACP 进程启动时经 --patch 加载）。
+# PG 会话持久化后端（dsh 基座实施方案）：禁用官方 JSONL 文件后端，换成 PG。
+# 插件 @kbcrm/dsh-session-persistence-pg 已分别安装进 sdk / acp profile
+#（dsh plugin --profile <sdk|acp> add，link 自 /d/AI/CRMnKB/dsh/session-persistence-pg）。
+# databaseUrl 默认本机开发库（5433），生产用环境变量 DSH_PG_URL 覆盖。
+- id: session-persistence-jsonl
+  disabled: true
+- insert:
+    - id: session-persistence-pg
+      name: '@kbcrm/dsh-session-persistence-pg'
+      config:
+        databaseUrl: !!js process.env.DSH_PG_URL ?? 'postgresql://crm:crm123@localhost:5433/crmnkb'
