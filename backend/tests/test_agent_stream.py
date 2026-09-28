@@ -211,6 +211,42 @@ async def test_stream_agent_chat_events_tool_failed(monkeypatch):
     assert frames[2]["status"] == "done" and frames[2]["is_error"] is True
 
 
+async def test_stream_agent_chat_events_tool_failed_with_error_text(monkeypatch):
+    """tool_call_update failed 且 content 带错误文本 → tool done 帧附 error 字段。"""
+    items = [
+        {"kind": "event", "event": {"session_update": "tool_call", "tool_call_id": "c1",
+                                    "title": "mcp__kb__web_search", "status": "in_progress"}},
+        {"kind": "event", "event": {
+            "session_update": "tool_call_update", "tool_call_id": "c1", "status": "failed",
+            "content": [{"type": "content", "content": {"type": "text",
+                                                        "text": "web_search 未启用"}}],
+        }},
+        {"kind": "event", "event": _chunk_event("搜索失败。")},
+        {"kind": "done", "final_response": "搜索失败。", "finish_reason": "end_turn"},
+    ]
+    monkeypatch.setattr(acp_bridge, "bridge", _FakeBridge(items))
+    frames = [
+        f
+        async for f in chat_service.stream_agent_chat_events(
+            _FakeSession(), _user(), "问题", _session()
+        )
+    ]
+    assert frames[2]["is_error"] is True
+    assert frames[2]["error"] == "web_search 未启用"
+
+
+def test_tool_error_text_shapes():
+    """_tool_error_text 兼容嵌套 content 包裹与直接 text 两种形态。"""
+    nested = {"content": [
+        {"type": "content", "content": {"type": "text", "text": "原因A"}},
+        {"type": "text", "text": "原因B"},
+        {"type": "diff", "path": "/x"},  # 非文本项忽略
+    ]}
+    assert chat_service._tool_error_text(nested) == "原因A\n原因B"
+    assert chat_service._tool_error_text({}) == ""
+    assert chat_service._tool_error_text({"content": None}) == ""
+
+
 async def test_stream_agent_chat_events_new_session_when_unbound(monkeypatch):
     """chat 会话未绑定 dsh_session_id：session/new 并显式 UPDATE 回写新 id。"""
     db = _FakeSession()

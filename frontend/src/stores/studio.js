@@ -288,6 +288,8 @@ export const useStudioStore = defineStore('studio', {
               if (entry) {
                 if (frame.is_error) entry.failed++
                 else entry.done++
+                // 失败原因（后端从 ACP 事件 content 提取），chip 上以 tooltip 展示
+                if (frame.error) entry.error = frame.error
                 entry.active = false
                 entry.tick++
               }

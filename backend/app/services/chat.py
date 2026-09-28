@@ -765,6 +765,26 @@ async def stream_chat_events(
 # ---------------------------------------------------------------------------
 
 
+def _tool_error_text(event: dict) -> str:
+    """从 ACP tool_call_update 的 content 里尽力提取失败原因文本（截断 300 字）。
+
+    dsh 透传的 MCP 工具结果 content 项形如
+    {"type": "content", "content": {"type": "text", "text": "..."}}，
+    部分实现也可能直接给 {"type": "text", ...}，两种都兼容。
+    """
+    texts: list[str] = []
+    for item in event.get("content") or []:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "content":
+            inner = item.get("content") or {}
+            if isinstance(inner, dict) and inner.get("type") == "text":
+                texts.append(str(inner.get("text") or ""))
+        elif item.get("type") == "text":
+            texts.append(str(item.get("text") or ""))
+    return "\n".join(t for t in texts if t).strip()[:300]
+
+
 async def stream_agent_chat_events(
     db: AsyncSession,
     user: User,
@@ -781,7 +801,7 @@ async def stream_agent_chat_events(
     ACP session/update → SSE 帧映射：
     - agent_message_chunk（text 块）→ token 帧
     - tool_call → tool 帧（status=start）
-    - tool_call_update（status=completed/failed）→ tool 帧（status=done，is_error）
+    - tool_call_update（status=completed/failed）→ tool 帧（status=done，is_error；失败附 error 文本）
     - 其余（usage_update / plan / thought 等）不透传
 
     落库用 _persist_turn 等价逻辑：answer 取 token 帧拼接（空则回退 final_response），
@@ -845,13 +865,20 @@ async def stream_agent_chat_events(
                 status = event.get("status")
                 if status in ("completed", "failed"):
                     call_id = str(event.get("tool_call_id") or "")
-                    yield {
+                    frame = {
                         "type": "tool",
                         "name": call_names.get(call_id, ""),
                         "status": "done",
                         "call_id": call_id,
                         "is_error": status == "failed",
                     }
+                    if status == "failed":
+                        # 把失败原因透出到前端（chip tooltip），便于用户自查
+                        # （如 web_search 未启用、网络不通等）
+                        err_text = _tool_error_text(event)
+                        if err_text:
+                            frame["error"] = err_text
+                    yield frame
     except Exception:
         logger.exception("dsh agent 流式运行失败")
         yield {"type": "error", "detail": "agent 运行失败，请稍后重试"}

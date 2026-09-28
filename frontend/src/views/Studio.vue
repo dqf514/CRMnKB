@@ -40,15 +40,17 @@
               <div class="msg-content markdown-body" v-html="renderMsg(m)" />
               <!-- 工具调用状态：连续相同工具合并为一个 chip，×N 计数随调用弹跳 -->
               <div v-if="m.role === 'ai' && m.tools?.length" class="tool-tags">
-                <div v-for="(t, j) in m.tools" :key="j" class="tool-chip" :class="{ done: !t.active && !(t.failed && !t.done), error: !t.active && t.failed > 0 && t.done === 0 }">
-                  <el-icon class="tool-chip-icon" :class="{ pulsing: t.active }" :size="15">
-                    <component :is="toolIcon(t.name)" />
-                  </el-icon>
-                  <span v-if="t.active">正在{{ toolLabel(t.name) }}…</span>
-                  <span v-else-if="t.failed && !t.done">{{ toolLabel(t.name) }} 失败</span>
-                  <span v-else>已使用 {{ toolLabel(t.name) }}</span>
-                  <span v-if="t.total > 1" :key="t.tick" class="tool-chip-count">×{{ t.total }}</span>
-                </div>
+                <el-tooltip v-for="(t, j) in m.tools" :key="j" :content="t.error" placement="top" :disabled="!t.error" :show-after="100">
+                  <div class="tool-chip" :class="{ done: !t.active && !(t.failed && !t.done), error: !t.active && t.failed > 0 && t.done === 0 }">
+                    <el-icon class="tool-chip-icon" :class="{ pulsing: t.active }" :size="15">
+                      <component :is="toolIcon(t.name)" />
+                    </el-icon>
+                    <span v-if="t.active">正在{{ toolLabel(t.name) }}…</span>
+                    <span v-else-if="t.failed && !t.done">{{ toolLabel(t.name) }} 失败</span>
+                    <span v-else>已使用 {{ toolLabel(t.name) }}</span>
+                    <span v-if="t.total > 1" :key="t.tick" class="tool-chip-count">×{{ t.total }}</span>
+                  </div>
+                </el-tooltip>
               </div>
               <!-- AI 思考中指示（agent 决策阶段） -->
               <div v-if="m.role === 'ai' && m.thinking && !m.content" class="thinking-indicator">

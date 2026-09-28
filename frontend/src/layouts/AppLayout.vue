@@ -49,10 +49,10 @@
         </template>
       </div>
 
-      <div class="side-divider" />
-
-      <!-- 底部导航组 -->
-      <nav class="side-nav">
+      <!-- 底部导航组（admin 管理菜单展开时隐藏，避免与常规导航堆叠） -->
+      <template v-if="!showAdminMenu">
+        <div class="side-divider" />
+        <nav class="side-nav">
         <template v-for="item in navItems" :key="item.key || item.path">
           <!-- 带子项的分组：点组头展开/收起，子项缩进排列 -->
           <template v-if="item.children">
@@ -90,7 +90,8 @@
             <span>{{ item.label }}</span>
           </div>
         </template>
-      </nav>
+        </nav>
+      </template>
 
       <!-- 用户行：头像姓名（下拉：个人中心/同步App/退出）+ 通知 + 明暗 + 设置(admin) -->
       <div class="user-row">
