@@ -1,39 +1,26 @@
 <template>
   <div class="sources-panel">
-    <!-- 知识库（仅当前工作区关联的） -->
+    <!-- 已关联来源（知识库与文件合并为同一列表，用图标区分类型） -->
     <div class="section">
       <div class="section-title">
         <el-icon><Collection /></el-icon>
-        <span>知识库</span>
-        <el-tag v-if="associatedKbs.length" size="small" type="primary">{{ associatedKbs.length }}</el-tag>
+        <span>已关联来源</span>
+        <el-tag v-if="associatedKbs.length + associatedFiles.length" size="small" type="primary">
+          {{ associatedKbs.length + associatedFiles.length }}
+        </el-tag>
         <el-button link size="small" :icon="Plus" class="section-add" @click="openAssociateDialog" />
       </div>
-      <div v-if="associatedKbs.length" class="source-list">
-        <div v-for="kb in associatedKbs" :key="kb.id" class="source-item">
+      <div v-if="associatedKbs.length + associatedFiles.length" class="source-list">
+        <div v-for="kb in associatedKbs" :key="'kb-' + kb.id" class="source-item">
           <el-checkbox :model-value="selectedKbIds.includes(kb.id)" @change="(v) => toggleKb(kb.id, v)" />
+          <el-icon class="file-icon"><Collection /></el-icon>
           <span class="item-name" :title="kb.name">{{ kb.name }}</span>
           <span class="item-meta">{{ kb.doc_count || 0 }} 文档</span>
           <el-tooltip content="取消关联" placement="top">
             <el-button link size="small" :icon="Close" class="remove-btn" @click="unassociateKb(kb.id)" />
           </el-tooltip>
         </div>
-      </div>
-      <div v-else class="empty-hint">
-        暂无关联知识库
-        <el-button link type="primary" @click="openAssociateDialog">+ 关联</el-button>
-      </div>
-    </div>
-
-    <!-- 文件（仅当前工作区关联的） -->
-    <div class="section">
-      <div class="section-title">
-        <el-icon><Files /></el-icon>
-        <span>文件</span>
-        <el-tag v-if="associatedFiles.length" size="small" type="success">{{ associatedFiles.length }}</el-tag>
-        <el-button link size="small" :icon="Plus" class="section-add" @click="openAssociateDialog" />
-      </div>
-      <div v-if="associatedFiles.length" class="source-list">
-        <div v-for="f in associatedFiles" :key="f.id" class="source-item">
+        <div v-for="f in associatedFiles" :key="'file-' + f.id" class="source-item">
           <el-checkbox :model-value="selectedFileIds.includes(f.id)" @change="(v) => toggleFile(f.id, v)" />
           <el-icon class="file-icon"><component :is="fileIcon(f.file_type)" /></el-icon>
           <span class="item-name file-link" :title="f.file_name" @click="openPreview(f)">{{ f.file_name }}</span>
@@ -43,7 +30,7 @@
         </div>
       </div>
       <div v-else class="empty-hint">
-        暂无关联文件
+        暂无关联来源
         <el-button link type="primary" @click="openAssociateDialog">+ 关联</el-button>
       </div>
     </div>
@@ -98,7 +85,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { Collection, Files, Plus, Close, Upload, Document, Picture, VideoCamera, Headset } from '@element-plus/icons-vue'
+import { Collection, Plus, Close, Upload, Document, Picture, VideoCamera, Headset } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { getKbs, getLibraryFiles } from '../../api'
 import { uploadLibraryFiles } from '../../api/libraryUpload'

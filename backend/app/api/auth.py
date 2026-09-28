@@ -18,10 +18,17 @@ from app.services.audit import record_audit
 from app.schemas.auth import (
     LoginRequest,
     PasswordChange,
+    PhoneLoginRequest,
     ProfileUpdate,
+    SmsCodeRequest,
     SsoExchangeRequest,
     TokenResponse,
     UserOut,
+)
+from app.services.login_channels import (
+    issue_login_code,
+    sms_login_enabled,
+    verify_login_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +106,67 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
     )
 
 
+# ---- 手机号验证码登录（通道配置在管理端「系统设置 → 登录与接入」） ----
+
+
+@router.post("/sms-code")
+async def send_sms_code(body: SmsCodeRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """发送短信登录验证码。dev 环境 + log 通道时响应带 dev_code（前端自动填充）。"""
+    if not await sms_login_enabled(db):
+        raise HTTPException(status_code=403, detail="短信登录未启用，请联系管理员")
+    ip = request.client.host if request.client else "unknown"
+    try:
+        dev_code = await issue_login_code(db, body.phone, ip)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_audit(db, None, "sms_code", "user", None, {"phone": body.phone}, ip)
+    await db.commit()
+    resp: dict = {"ok": True, "message": "验证码已发送"}
+    if dev_code:
+        resp["dev_code"] = dev_code
+    return resp
+
+
+@router.post("/login/phone", response_model=TokenResponse)
+async def login_by_phone(body: PhoneLoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """手机号 + 验证码登录。失败计数与账号密码登录共用 login_attempts 限流口径。"""
+    if not await sms_login_enabled(db):
+        raise HTTPException(status_code=403, detail="短信登录未启用，请联系管理员")
+    ip = request.client.host if request.client else "unknown"
+    await _check_login_rate_limit(db, body.phone, ip)
+    if not await verify_login_code(db, body.phone, body.code):
+        await _record_login_failure(db, body.phone, ip)
+        record_audit(db, None, "login", "user", None, {"phone": body.phone, "via": "phone", "ok": False}, ip)
+        await db.commit()
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    users = (
+        (await db.execute(select(User).where(User.phone == body.phone, User.status == 1)))
+        .scalars()
+        .all()
+    )
+    if not users:
+        await db.commit()  # 提交验证码已用标记
+        raise HTTPException(status_code=400, detail="该手机号未绑定任何账号，请先在个人中心绑定")
+    if len(users) > 1:
+        # phone 唯一索引是 (tenant_id, phone)，跨租户撞号时拒绝并提示（单租户部署不会触发）
+        await db.commit()
+        raise HTTPException(status_code=400, detail="该手机号对应多个账号，请联系管理员")
+    user = users[0]
+    await _clear_login_failures(db, body.phone, ip)
+    user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    record_audit(db, user, "login", "user", user.id, {"ok": True, "via": "phone"}, ip)
+    await db.commit()
+    token = create_access_token(
+        user.id, user.username,
+        expires_minutes=30 * 24 * 60 if body.long_lived else None,
+    )
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserOut.model_validate(user),
+    )
+
+
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)):
     return user
@@ -144,7 +212,19 @@ async def update_profile(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    for field, value in body.model_dump(exclude_unset=True).items():
+    updates = body.model_dump(exclude_unset=True)
+    # 手机号租户内唯一（为后续手机号登录做准备；DB 层有部分唯一索引兜底）
+    if updates.get("phone"):
+        dup = await db.scalar(
+            select(User.id).where(
+                User.tenant_id == user.tenant_id,
+                User.phone == updates["phone"],
+                User.id != user.id,
+            )
+        )
+        if dup is not None:
+            raise HTTPException(status_code=409, detail="该手机号已被其他账号使用")
+    for field, value in updates.items():
         setattr(user, field, value)
     await db.commit()
     await db.refresh(user)

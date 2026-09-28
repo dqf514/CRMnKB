@@ -26,6 +26,9 @@
             <el-form-item label="邮箱" prop="email">
               <el-input v-model="profileForm.email" placeholder="电子邮箱" />
             </el-form-item>
+            <el-form-item label="手机号" prop="phone">
+              <el-input v-model="profileForm.phone" placeholder="手机号（后续可用于手机/微信登录）" maxlength="11" />
+            </el-form-item>
             <el-form-item>
               <el-button type="primary" :loading="profileSaving" @click="saveProfile">保存修改</el-button>
             </el-form-item>
@@ -125,9 +128,10 @@ const themeStore = useThemeStore()
 // ========== 基本信息 ==========
 const profileSaving = ref(false)
 const profileFormRef = ref()
-const profileForm = reactive({ avatar_url: '', name: '', email: '' })
+const profileForm = reactive({ avatar_url: '', name: '', email: '', phone: '' })
 const profileRules = {
   email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }],
+  phone: [{ pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }],
 }
 
 const avatarFallback = computed(() => {
@@ -206,6 +210,7 @@ function fillProfile() {
   profileForm.avatar_url = u.avatar_url || ''
   profileForm.name = u.name || ''
   profileForm.email = u.email || ''
+  profileForm.phone = u.phone || ''
 }
 
 async function saveProfile() {
@@ -229,6 +234,7 @@ async function saveProfile() {
       avatar_url: avatarUrl,
       name: profileForm.name,
       email: profileForm.email || null,
+      phone: profileForm.phone || null,
     })
     const me = await getMe()
     authStore.user = me

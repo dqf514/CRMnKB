@@ -36,6 +36,7 @@ from app.models.user import User
 from app.services.agent_approvals import create_approval
 from app.services.llm import resolve_embed_llm
 from app.services.permissions import accessible_ids, get_access, satisfies
+from app.services.skills.registry import execute_skill, get_enabled_skills
 from app.services.rag import (
     _find_block,
     attach_file_info,
@@ -66,8 +67,9 @@ kb_mcp = FastMCP(
     "kb",
     instructions=(
         "企业内部知识库 + CRM（dsh 基座阶段 2）。只读工具：kb_search 混合检索切片、"
-        "kb_read_doc 读整份文档、kb_list 列出可读知识库、crm_search_customers 模糊检索客户、"
-        "crm_get_customer 客户详情。写工具（crm_add_followup / mail_draft_create）不直接生效，"
+        "kb_read_doc 读整份文档、kb_list 列出可读知识库、crm_list_customers 客户全量名单与总数、"
+        "crm_search_customers 模糊检索客户、crm_get_customer 客户详情、web_search 联网搜索、web_fetch 抓取网页。"
+        "写工具（crm_add_followup / mail_draft_create）不直接生效，"
         "只创建审批单，管理员批准后由系统自动执行。只能访问令牌所属用户有权限的资料。"
     ),
     streamable_http_path="/api/mcp",
@@ -329,6 +331,8 @@ def _customer_summary(c: Customer) -> dict:
         "status": c.status,
         "industries": c.industries or [],
         "tags": c.tags or [],
+        # 前端客户主页路由：模型回答中提及客户时应输出 Markdown 链接 [名称](url)
+        "url": f"/customers/{c.id}",
     }
 
 
@@ -361,6 +365,41 @@ async def crm_search_customers_impl(
     )
     rows = (await db.execute(stmt)).scalars().all()
     return [_customer_summary(c) for c in rows]
+
+
+async def crm_list_customers_impl(
+    db: AsyncSession, user: User, limit: int = 20, offset: int = 0
+) -> dict:
+    """全量客户名单 + 总数（crm_list_customers 的实现）。
+
+    无需关键词，回答「当前有多少客户 / 分别是谁」类问题；租户内全员可见、
+    排除软删，口径与 crm_search_customers 一致。
+    """
+    limit = max(1, min(int(limit), 50))
+    offset = max(0, int(offset))
+    base_where = (
+        Customer.tenant_id == user.tenant_id,
+        Customer.deleted_at.is_(None),
+    )
+    total = await db.scalar(select(func.count(Customer.id)).where(*base_where))
+    rows = (
+        (
+            await db.execute(
+                select(Customer)
+                .where(*base_where)
+                .order_by(Customer.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return {
+        "total": int(total or 0),
+        "offset": offset,
+        "items": [_customer_summary(c) for c in rows],
+    }
 
 
 async def crm_get_customer_impl(db: AsyncSession, user: User, customer_id: int) -> dict:
@@ -527,8 +566,30 @@ async def _kb_list_tool(ctx: Context = None) -> list[dict]:
 
 
 @kb_mcp.tool(
+    name="crm_list_customers",
+    description=(
+        "列出全部客户名单与总数（无需关键词，租户内全员可见）。"
+        "用户问「有多少客户 / 客户名单 / 分别是谁」时用本工具；"
+        "返回 total（客户总数）与 items（概要列表），超过 limit 时用 offset 翻页。"
+        "按关键词查找特定客户请改用 crm_search_customers。"
+        "回答中提及客户时，必须用 Markdown 链接指向客户主页：[客户名称](该客户的 url 字段)。"
+    ),
+)
+async def _crm_list_customers_tool(
+    limit: int = 20, offset: int = 0, ctx: Context = None
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_list_customers_impl(db, user, limit, offset)
+
+
+@kb_mcp.tool(
     name="crm_search_customers",
-    description="按名称/公司/职务/电话/邮箱/行业模糊检索客户，返回客户概要列表（租户内全员可见）。",
+    description=(
+        "按名称/公司/职务/电话/邮箱/行业模糊检索客户，返回客户概要列表（租户内全员可见）。"
+        "需要全部客户名单或客户总数时不要猜关键词，改用 crm_list_customers。"
+        "回答中提及客户时，必须用 Markdown 链接指向客户主页：[客户名称](该客户的 url 字段)。"
+    ),
 )
 async def _crm_search_customers_tool(
     query: str, limit: int = 10, ctx: Context = None
@@ -540,7 +601,10 @@ async def _crm_search_customers_tool(
 
 @kb_mcp.tool(
     name="crm_get_customer",
-    description="按 customer_id 获取客户详情，含最近 10 条跟进记录与进行中的商机概要。",
+    description=(
+        "按 customer_id 获取客户详情，含最近 10 条跟进记录与进行中的商机概要。"
+        "回答中提及客户时，必须用 Markdown 链接指向客户主页：[客户名称](该客户的 url 字段)。"
+    ),
 )
 async def _crm_get_customer_tool(customer_id: int, ctx: Context = None) -> dict:
     async with AsyncSessionLocal() as db:
@@ -576,6 +640,53 @@ async def _mail_draft_create_tool(
     async with AsyncSessionLocal() as db:
         user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
         return await mail_draft_create_impl(db, user, customer_id, to, subject, body)
+
+
+# ---------------------------------------------------------------------------
+# 联网工具：复用管理端「Skill 管理」配置的 builtin web_search / web_fetch
+# （provider/key 在 DB 里维护，agent 与后台对话共用同一配置与调用埋点）。
+# dsh 内置的 web_search（deepseek 原生搜索）要求官方平台 key，与聊天的
+# llm-pi-ai 网关 key 不通用，已在 acp-model.yml 进程 patch 中禁用，统一走这里。
+# ---------------------------------------------------------------------------
+
+
+async def _run_builtin_skill(db: AsyncSession, user: User, name: str, args: dict) -> str:
+    """按名取租户已启用的 builtin skill 并执行（带超时/截断/调用埋点）。"""
+    skills = await get_enabled_skills(db, user.tenant_id)
+    skill = next((s for s in skills if s.name == name), None)
+    if skill is None:
+        raise McpToolError(f"{name} 未启用（请在管理端「Skill 管理」中开启）")
+    try:
+        return await execute_skill(
+            skill, args, {"tenant_id": user.tenant_id, "user_id": user.id, "caller": "mcp"}
+        )
+    except McpToolError:
+        raise
+    except Exception as exc:
+        raise McpToolError(f"{name} 调用失败: {exc}") from exc
+
+
+@kb_mcp.tool(
+    name="web_search",
+    description=(
+        "联网搜索最新信息，返回 Top 结果（标题+摘要+链接）。需要实时资讯/新闻/知识库以外的"
+        "公开信息时使用；结果不理想可换关键词重试，并用 web_fetch 打开链接阅读全文。"
+    ),
+)
+async def _web_search_tool(query: str, ctx: Context = None) -> str:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await _run_builtin_skill(db, user, "web_search", {"query": query})
+
+
+@kb_mcp.tool(
+    name="web_fetch",
+    description="抓取指定 URL 的网页正文（转纯文本，截断返回）。需要阅读某个网页全文时使用。",
+)
+async def _web_fetch_tool(url: str, ctx: Context = None) -> str:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await _run_builtin_skill(db, user, "web_fetch", {"url": url})
 
 
 def build_mcp_asgi_app():

@@ -43,8 +43,33 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS profile_updated_at TIMESTAMP")
         )
+        # P1 Pipeline：DDQ 状态 + AI 阶段简报
+        await conn.execute(
+            text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS ddq_status VARCHAR(20) DEFAULT 'none'")
+        )
+        await conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS ai_brief TEXT"))
+        await conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS ai_brief_at TIMESTAMP"))
+        # P1 跟进记录：下一步行动
+        await conn.execute(text("ALTER TABLE follow_up_records ADD COLUMN IF NOT EXISTS next_step TEXT"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(100)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)"))
+        # 手机号租户内唯一（部分唯一索引，NULL 不参与），为后续手机号/微信登录做准备
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_phone "
+                "ON users (tenant_id, phone) WHERE phone IS NOT NULL"
+            )
+        )
+        # 微信登录预留列（登录流程后续接入，先存绑定关系）
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat_openid VARCHAR(64)"))
+        await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS wechat_unionid VARCHAR(64)"))
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_wechat_openid "
+                "ON users (tenant_id, wechat_openid) WHERE wechat_openid IS NOT NULL"
+            )
+        )
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'")
         )

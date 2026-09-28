@@ -64,6 +64,10 @@
           <el-input-number v-model="genForm.timeout" :min="30" :max="600" :step="30" style="width: 140px" />
           <span class="form-tip">AI 生成超时上限，长报告建议调大</span>
         </el-form-item>
+        <el-form-item v-if="dshAgentEnabled" label="Agent 模式">
+          <el-switch v-model="genForm.agent" />
+          <span class="form-tip">由 Agent 自主检索、阅读后撰写，耗时更长但更深入</span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="genDialog = false">取消</el-button>
@@ -99,6 +103,10 @@
         <el-form-item label="超时(秒)">
           <el-input-number v-model="composeForm.timeout" :min="30" :max="600" :step="30" style="width: 140px" />
           <span class="form-tip">长报告（HTML 排版）生成较慢，可调大</span>
+        </el-form-item>
+        <el-form-item v-if="dshAgentEnabled" label="Agent 模式">
+          <el-switch v-model="composeForm.agent" />
+          <span class="form-tip">由 Agent 自主检索知识库/联网后撰写，耗时更长但更深入</span>
         </el-form-item>
         <el-form-item label="附件">
           <div class="attach-area">
@@ -212,6 +220,11 @@ import {
 import { uploadLibraryFiles } from '../../api/libraryUpload'
 import { renderMarkdown } from '../../utils/markdown'
 import { reportTypeMap, reportStatusMap, enumLabel, enumTagType, formatDateTime } from '../../utils/format'
+import { useBrandStore } from '../../stores/brand'
+
+const brandStore = useBrandStore()
+// Agent 模式开关仅在后端 DSH_AGENT_ENABLED 开启时展示（随品牌公开配置下发）
+const dshAgentEnabled = computed(() => brandStore.dshAgentEnabled)
 
 const loading = ref(false)
 const list = ref([])
@@ -220,7 +233,7 @@ const total = ref(0)
 const genDialog = ref(false)
 const generating = ref(false)
 const genFormRef = ref()
-const genForm = reactive({ type: 'customer_analysis', customer_id: null, dateRange: null, timeout: 180, language: 'zh' })
+const genForm = reactive({ type: 'customer_analysis', customer_id: null, dateRange: null, timeout: 180, language: 'zh', agent: false })
 const genRules = {
   type: [{ required: true, message: '请选择报告类型', trigger: 'change' }],
   customer_id: [{ required: true, message: '请选择客户', trigger: 'change' }],
@@ -279,7 +292,7 @@ async function loadCustomerOptions() {
 }
 
 function openGenerate() {
-  Object.assign(genForm, { type: 'customer_analysis', customer_id: null, dateRange: null, timeout: 180, language: 'zh' })
+  Object.assign(genForm, { type: 'customer_analysis', customer_id: null, dateRange: null, timeout: 180, language: 'zh', agent: false })
   genDialog.value = true
   nextTick(() => genFormRef.value?.clearValidate())
 }
@@ -291,6 +304,7 @@ async function handleGenerate() {
     const data = { type: genForm.type, timeout: genForm.timeout, language: genForm.language }
     if (genForm.type === 'customer_analysis') data.customer_id = genForm.customer_id
     else { data.start_date = genForm.dateRange?.[0]; data.end_date = genForm.dateRange?.[1] }
+    if (genForm.agent) data.agent = true
     await generateReport(data)
     ElMessage.success('已提交生成，请稍候')
     genDialog.value = false
@@ -302,7 +316,7 @@ async function handleGenerate() {
 const composeDialog = ref(false)
 const composing = ref(false)
 const composeFormRef = ref()
-const composeForm = reactive({ prompt: '', kb_ids: [], timeout: 180, language: 'zh' })
+const composeForm = reactive({ prompt: '', kb_ids: [], timeout: 180, language: 'zh', agent: false })
 const composeRules = { prompt: [{ required: true, message: '请描述报告需求', trigger: 'blur' }] }
 const kbOptions = ref([])
 const workbenchKb = ref(null)
@@ -312,7 +326,7 @@ let attachTimer = null
 const canCompose = computed(() => !attachments.value.some((a) => a.status !== 'ready'))
 
 async function openCompose() {
-  Object.assign(composeForm, { prompt: '', kb_ids: [], timeout: 180, language: 'zh' })
+  Object.assign(composeForm, { prompt: '', kb_ids: [], timeout: 180, language: 'zh', agent: false })
   attachments.value = []
   composeDialog.value = true
   nextTick(() => composeFormRef.value?.clearValidate())
@@ -376,6 +390,7 @@ async function handleCompose() {
   try {
     const data = { type: 'custom', prompt: composeForm.prompt.trim(), timeout: composeForm.timeout, language: composeForm.language }
     if (composeForm.kb_ids.length) data.kb_ids = composeForm.kb_ids
+    if (composeForm.agent) data.agent = true
     const fileIds = attachments.value.filter((a) => a.status === 'ready' && a.file_id).map((a) => a.file_id)
     if (fileIds.length) data.file_ids = fileIds
     await generateReport(data)

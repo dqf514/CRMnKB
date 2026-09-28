@@ -189,7 +189,12 @@ class AcpBridge:
             "- id: acp\n"
             "  config:\n"
             "    provider: kbcrm\n"
-            f"    model: {model_name}\n",
+            f"    model: {model_name}\n"
+            # dsh 内置 web_search 走 deepseek 官方 Anthropic 端点，与聊天的 llm-pi-ai
+            # 网关 key 不通用（401 WEB_PROVIDER_ERROR）。联网能力由知识库 MCP server 的
+            # mcp__kb__web_search / web_fetch 提供（复用管理端 Skill 配置），这里整体禁用。
+            "- id: tool-web\n"
+            "  disabled: true\n",
             encoding="utf-8",
         )
         return p

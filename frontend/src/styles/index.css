@@ -17,6 +17,9 @@
   --app-border: var(--app-line);
   /* Studio 浅色：左/右列比主区更深（侧栏） */
   --studio-side-bg: #f8fafc;
+  /* 新布局侧栏（Manus 风）：浅灰底 + 菜单项 hover/选中态 */
+  --sidebar-bg: #f5f6f8;
+  --sidebar-hover: rgba(31, 41, 55, 0.055);
 }
 
 html.dark {
@@ -34,6 +37,9 @@ html.dark {
   --app-border: var(--app-line);
   /* Studio 暗色：左/右列比主区更深 */
   --studio-side-bg: #131922;
+  /* 新布局侧栏暗色 */
+  --sidebar-bg: #121822;
+  --sidebar-hover: rgba(255, 255, 255, 0.06);
 }
 
 html,

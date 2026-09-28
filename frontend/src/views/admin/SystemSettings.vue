@@ -49,6 +49,114 @@
           <el-button type="primary" :loading="saving" @click="saveFormats">保存</el-button>
         </div>
       </el-tab-pane>
+
+      <!-- 登录与接入：短信验证码通道 + 微信登录预留 -->
+      <el-tab-pane label="登录与接入" name="login">
+        <div class="hint formats-hint">
+          手机号验证码登录：开启后登录页出现「手机验证码登录」入口，用户需先在「个人中心」绑定手机号；
+          微信登录当前仅保存配置（users 表已预留 wechat_openid/unionid 字段），扫码/授权登录流程后续版本接入。
+        </div>
+        <el-form label-width="130px" style="max-width: 640px">
+          <el-divider content-position="left">短信验证码登录</el-divider>
+          <el-form-item label="启用短信登录">
+            <el-switch v-model="loginCfg.sms.enabled" />
+          </el-form-item>
+          <el-form-item label="发送通道">
+            <el-radio-group v-model="loginCfg.sms.provider">
+              <el-radio value="log">仅记录日志（开发/内测）</el-radio>
+              <el-radio value="http">通用 HTTP 网关</el-radio>
+            </el-radio-group>
+            <div class="hint" style="margin-left: 0; width: 100%">
+              log 通道不真实发短信，dev 环境验证码直接返回到登录页；阿里云/腾讯云通道为预留扩展位，确定平台后即可接入。
+            </div>
+          </el-form-item>
+          <template v-if="loginCfg.sms.provider === 'http'">
+            <el-form-item label="网关 URL">
+              <el-input v-model="loginCfg.sms.http.url" placeholder="https://sms-provider.example.com/send" />
+            </el-form-item>
+            <el-form-item label="请求体模板">
+              <el-input
+                v-model="loginCfg.sms.http.body_template"
+                type="textarea" :rows="2"
+                placeholder='{"phone": "{phone}", "code": "{code}"}'
+              />
+              <div class="hint" style="margin-left: 0; width: 100%">{phone} {code} 会被替换为实际值</div>
+            </el-form-item>
+            <el-form-item label="请求头">
+              <el-input
+                v-model="loginCfg.sms.http.headersText"
+                type="textarea" :rows="2"
+                placeholder='{"Authorization": "Bearer xxx"}（JSON，可空）'
+              />
+            </el-form-item>
+          </template>
+          <el-divider content-position="left">微信登录（预留）</el-divider>
+          <el-form-item label="启用微信登录">
+            <el-switch v-model="loginCfg.wechat.enabled" />
+          </el-form-item>
+          <el-form-item label="AppID">
+            <el-input v-model="loginCfg.wechat.app_id" placeholder="微信开放平台 / 公众号 AppID" />
+          </el-form-item>
+          <el-form-item label="AppSecret">
+            <el-input
+              v-model="loginCfg.wechat.app_secret"
+              type="password" show-password
+              :placeholder="loginCfg.wechat.has_app_secret ? `已保存（尾号 ${loginCfg.wechat.app_secret_tail}），输入以更换` : '未设置'"
+            />
+            <div class="hint" style="margin-left: 0; width: 100%">加密存储、脱敏回显；留空表示不修改，输入新值后保存即覆盖</div>
+          </el-form-item>
+          <el-form-item label="回调地址">
+            <el-input v-model="loginCfg.wechat.redirect_uri" placeholder="https://your-domain/login/wechat/callback" />
+          </el-form-item>
+        </el-form>
+        <div class="footer">
+          <el-button type="primary" :loading="saving" @click="saveLoginCfg">保存</el-button>
+        </div>
+      </el-tab-pane>
+      <!-- 邮件写作规范：注入 AI 邮件草稿生成 -->
+      <el-tab-pane label="邮件写作规范" name="email-guide">
+        <div class="hint formats-hint">
+          该规范会注入 AI 邮件草稿生成，约束邮件的写法、结构和风格
+        </div>
+        <el-input
+          v-model="emailGuide"
+          type="textarea"
+          :rows="12"
+          placeholder="例如：邮件开头称呼对方姓名；正文分三段：背景、方案、下一步；落款使用公司统一签名……"
+          style="max-width: 720px"
+        />
+        <div class="footer">
+          <el-button type="primary" :loading="saving" @click="saveEmailGuide">保存</el-button>
+        </div>
+      </el-tab-pane>
+      <!-- 文档资料类型：客户文档上传/展示的可选分类，可增删改 -->
+      <el-tab-pane label="文档资料类型" name="doc-categories">
+        <div class="hint formats-hint">
+          客户文档上传时可选的资料类型；标识用于存储（仅小写字母/数字/下划线），名称为界面显示。
+          删除类型不影响存量文件（已标记的文件会显示原始标识）。
+        </div>
+        <el-table :data="docCategories" size="small" style="max-width: 720px">
+          <el-table-column label="标识（value）" width="220">
+            <template #default="{ row }">
+              <el-input v-model="row.value" size="small" placeholder="如 factsheet" :disabled="!row._new" />
+            </template>
+          </el-table-column>
+          <el-table-column label="显示名称">
+            <template #default="{ row }">
+              <el-input v-model="row.label" size="small" placeholder="如 产品资料" />
+            </template>
+          </el-table-column>
+          <el-table-column width="70" align="center">
+            <template #default="{ $index }">
+              <el-button link type="danger" size="small" @click="docCategories.splice($index, 1)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <div class="footer" style="display: flex; gap: 8px">
+          <el-button size="small" @click="docCategories.push({ value: '', label: '', _new: true })">新增类型</el-button>
+          <el-button type="primary" size="small" :loading="saving" @click="saveDocCategories">保存</el-button>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </el-card>
 </template>
@@ -57,10 +165,12 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Upload } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { getBrand, updateBrand, uploadBrandLogo, getParseFormats, updateParseFormats } from '../../api'
+import { getBrand, updateBrand, uploadBrandLogo, getParseFormats, updateParseFormats, getLoginIntegrations, updateLoginIntegrations, getEmailGuide, updateEmailGuide, getDocCategories, updateDocCategories } from '../../api'
 import { useBrandStore } from '../../stores/brand'
+import { useDocCategoryStore } from '../../stores/docCategories'
 
 const brandStore = useBrandStore()
+const docCategoryStore = useDocCategoryStore()
 
 // ========== 品牌设置 ==========
 const systemName = ref('')
@@ -146,6 +256,121 @@ async function saveFormats() {
   }
 }
 
+// ========== 登录与接入 ==========
+const loginCfg = reactive({
+  sms: {
+    enabled: false,
+    provider: 'log',
+    http: { url: '', body_template: '{"phone": "{phone}", "code": "{code}"}', headersText: '' },
+  },
+  wechat: { enabled: false, app_id: '', app_secret: '', has_app_secret: false, app_secret_tail: '', redirect_uri: '' },
+})
+
+async function loadLoginCfg() {
+  try {
+    const res = await getLoginIntegrations()
+    loginCfg.sms.enabled = !!res?.sms?.enabled
+    loginCfg.sms.provider = res?.sms?.provider || 'log'
+    loginCfg.sms.http.url = res?.sms?.http?.url || ''
+    loginCfg.sms.http.body_template = res?.sms?.http?.body_template || '{"phone": "{phone}", "code": "{code}"}'
+    loginCfg.sms.http.headersText = res?.sms?.http?.headers ? JSON.stringify(res.sms.http.headers, null, 2) : ''
+    loginCfg.wechat.enabled = !!res?.wechat?.enabled
+    loginCfg.wechat.app_id = res?.wechat?.app_id || ''
+    loginCfg.wechat.has_app_secret = !!res?.wechat?.has_app_secret
+    loginCfg.wechat.app_secret_tail = res?.wechat?.app_secret_tail || ''
+    loginCfg.wechat.app_secret = ''
+    loginCfg.wechat.redirect_uri = res?.wechat?.redirect_uri || ''
+  } catch { /* 拦截器已提示 */ }
+}
+
+async function saveLoginCfg() {
+  let headers = {}
+  if (loginCfg.sms.provider === 'http' && loginCfg.sms.http.headersText.trim()) {
+    try {
+      headers = JSON.parse(loginCfg.sms.http.headersText)
+    } catch {
+      ElMessage.warning('请求头不是合法 JSON')
+      return
+    }
+  }
+  saving.value = true
+  try {
+    const res = await updateLoginIntegrations({
+      sms: {
+        enabled: loginCfg.sms.enabled,
+        provider: loginCfg.sms.provider,
+        http: { url: loginCfg.sms.http.url, body_template: loginCfg.sms.http.body_template, headers },
+      },
+      wechat: {
+        enabled: loginCfg.wechat.enabled,
+        app_id: loginCfg.wechat.app_id,
+        // 未输入 = 保持原值（后端 null 语义）；输入后覆盖
+        app_secret: loginCfg.wechat.app_secret || null,
+        redirect_uri: loginCfg.wechat.redirect_uri,
+      },
+    })
+    loginCfg.wechat.has_app_secret = !!res?.wechat?.has_app_secret
+    loginCfg.wechat.app_secret_tail = res?.wechat?.app_secret_tail || ''
+    loginCfg.wechat.app_secret = ''
+    // 短信开关变化影响登录页入口，刷新公开品牌配置
+    brandStore.load()
+    ElMessage.success('已保存')
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    saving.value = false
+  }
+}
+
+// ========== 邮件写作规范 ==========
+const emailGuide = ref('')
+
+async function loadEmailGuide() {
+  try {
+    const res = await getEmailGuide()
+    emailGuide.value = res?.guide || ''
+  } catch { /* 拦截器已提示 */ }
+}
+
+async function saveEmailGuide() {
+  saving.value = true
+  try {
+    await updateEmailGuide(emailGuide.value)
+    ElMessage.success('已保存')
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    saving.value = false
+  }
+}
+
+// ========== 文档资料类型 ==========
+const docCategories = ref([])
+
+async function loadDocCategories() {
+  try {
+    const res = await getDocCategories()
+    docCategories.value = (res?.items || []).map((c) => ({ value: c.value, label: c.label }))
+  } catch { /* 拦截器已提示 */ }
+}
+
+async function saveDocCategories() {
+  saving.value = true
+  try {
+    const items = docCategories.value.map((c) => ({ value: (c.value || '').trim(), label: (c.label || '').trim() }))
+    await updateDocCategories(items)
+    ElMessage.success('已保存')
+    // 刷新全局缓存，上传/展示处立即生效
+    docCategoryStore.loaded = false
+    docCategoryStore.load(true)
+    loadDocCategories()
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    saving.value = false
+  }
+}
+
 // ========== 公共 ==========
 const activeTab = ref('brand')
 const saving = ref(false)
@@ -153,6 +378,9 @@ const saving = ref(false)
 onMounted(() => {
   loadBrand()
   loadFormats()
+  loadLoginCfg()
+  loadEmailGuide()
+  loadDocCategories()
 })
 </script>
 

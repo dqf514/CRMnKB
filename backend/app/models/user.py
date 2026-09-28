@@ -25,6 +25,11 @@ class User(Base):
     # 改密时间（naive UTC）：早于该时间签发的 JWT 一律失效；NULL 跳过校验
     password_changed_at: Mapped[datetime | None]
     email: Mapped[str | None] = mapped_column(String(100))
+    # 手机号（租户内唯一，部分唯一索引在 init_db 幂等创建）：为手机号/微信登录做准备
+    phone: Mapped[str | None] = mapped_column(String(20))
+    # 微信登录预留：开放平台 openid（租户内唯一）/ unionid（跨应用打通用，可空）
+    wechat_openid: Mapped[str | None] = mapped_column(String(64))
+    wechat_unionid: Mapped[str | None] = mapped_column(String(64))
     avatar_url: Mapped[str | None] = mapped_column(String(500))
     preferences: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

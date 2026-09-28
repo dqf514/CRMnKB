@@ -97,7 +97,12 @@ class WebSearchSkill(Skill):
         lines = []
         for i, r in enumerate(results[:5], 1):
             lines.append(f"{i}. {r['title']}\n{r['snippet']}\n{r['url']}")
-        return truncate_result("\n\n".join(lines))
+        # 引用指引放在截断之后，保证模型一定能看到：
+        # 模型按 [序号](URL) 输出 Markdown 链接，前端渲染为上标、悬停显示原始网址
+        return truncate_result("\n\n".join(lines)) + (
+            "\n\n引用规范：回答中使用以上结果时，在相关句末以 Markdown 链接标注来源序号，"
+            "格式为 [序号](对应URL)，例如 [1](https://example.com)。"
+        )
 
     async def _tavily(self, query: str) -> list[dict]:
         api_key = self.config.get("api_key")

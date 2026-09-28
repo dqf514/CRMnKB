@@ -34,5 +34,6 @@ from app.models.brand_settings import BrandSettings  # noqa: F401
 from app.models.resource_permission import ResourcePermission  # noqa: F401
 from app.models.document_version import DocumentVersion  # noqa: F401
 from app.models.login_attempt import LoginAttempt  # noqa: F401
+from app.models.login_code import LoginCode  # noqa: F401
 from app.models.system_setting import SystemSetting  # noqa: F401
 from app.models.agent_approval import AgentApproval  # noqa: F401

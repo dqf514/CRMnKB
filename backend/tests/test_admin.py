@@ -92,6 +92,7 @@ def _override(db, role="admin", **user_fields):
         role=role,
         status=1,
         email=None,
+        phone=None,
         group_id=None,
         last_login_at=None,
         created_at=datetime(2026, 1, 1),
@@ -132,7 +133,7 @@ async def test_list_users(client):
     db = _FakeSession()
     _override(db)
     member = SimpleNamespace(
-        id=2, tenant_id=1, username="alice", name="爱丽丝", email=None,
+        id=2, tenant_id=1, username="alice", name="爱丽丝", email=None, phone=None,
         role="user", group_id=1, status=1, last_login_at=None,
         created_at=datetime(2026, 1, 2),
     )

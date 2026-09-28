@@ -103,6 +103,35 @@
       <el-empty v-if="!backups.length" description="暂无备份" :image-size="60" />
       <p class="pref-tip">备份含数据库 + 上传目录；保留最近 10 份。恢复为破坏性操作（覆盖当前数据），建议维护窗口执行。</p>
     </el-card>
+
+    <!-- 沙箱数据重置（危险操作，仅 dev/sandbox 环境显示） -->
+    <el-card v-if="['dev', 'sandbox'].includes(brandStore.env)" shadow="never" class="danger-card" style="margin-top: 16px">
+      <template #header>
+        <span class="card-title danger-title">危险区：沙箱数据重置</span>
+      </template>
+      <p class="pref-tip">
+        重置将自动备份当前数据，然后清空全部业务数据（客户、文档、知识库、任务等），用于试用环境快速恢复初始状态。该操作不可撤销。
+      </p>
+      <el-button type="danger" :loading="resetting" @click="openResetDialog">重置沙箱数据</el-button>
+    </el-card>
+
+    <!-- 重置确认：需输入 RESET -->
+    <el-dialog v-model="resetDialog" title="确认重置沙箱数据" width="min(90vw, 440px)">
+      <el-alert
+        type="error"
+        :closable="false"
+        title="该操作会清空全部业务数据，不可撤销（重置前会自动备份）"
+        style="margin-bottom: 14px"
+      />
+      <p class="pref-tip">请输入 RESET 确认操作：</p>
+      <el-input v-model="resetConfirmText" placeholder="RESET" />
+      <template #footer>
+        <el-button @click="resetDialog = false">取消</el-button>
+        <el-button type="danger" :loading="resetting" :disabled="resetConfirmText !== 'RESET'" @click="handleResetSandbox">
+          确认重置
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -110,8 +139,40 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Refresh, Delete, MagicStick, Plus, Files } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getSystemOverview, runMaintenance, createBackup, getBackups, restoreBackup } from '../../api'
+import { getSystemOverview, runMaintenance, createBackup, getBackups, restoreBackup, resetSandbox } from '../../api'
+import { useBrandStore } from '../../stores/brand'
 import { formatUptime, formatFileSize, formatDateTime } from '../../utils/format'
+
+const brandStore = useBrandStore()
+
+// ========== 沙箱数据重置 ==========
+const resetting = ref(false)
+const resetDialog = ref(false)
+const resetConfirmText = ref('')
+
+function openResetDialog() {
+  resetConfirmText.value = ''
+  resetDialog.value = true
+}
+
+async function handleResetSandbox() {
+  resetting.value = true
+  try {
+    const res = await resetSandbox()
+    resetDialog.value = false
+    ElMessageBox.alert(
+      `业务数据已清空。重置前已自动备份：${res?.backup || '（未返回备份名）'}`,
+      '重置完成',
+      { confirmButtonText: '知道了' }
+    )
+    load()
+    loadBackups()
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    resetting.value = false
+  }
+}
 
 const loading = ref(false)
 const data = ref({})
@@ -296,6 +357,12 @@ onUnmounted(() => {
 }
 .card-title {
   font-weight: 600;
+}
+.danger-card {
+  border-color: var(--el-color-danger-light-5);
+}
+.danger-title {
+  color: var(--el-color-danger);
 }
 .counts {
   display: grid;

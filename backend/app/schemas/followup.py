@@ -7,6 +7,8 @@ from pydantic import BaseModel
 class FollowUpCreate(BaseModel):
     type: Literal["call", "meeting", "email", "visit"]
     content: str
+    # 下一步行动（可选）
+    next_step: str | None = None
 
 
 class FollowUpOut(BaseModel):
@@ -18,4 +20,5 @@ class FollowUpOut(BaseModel):
     type: str
     content: str
     ai_summary: str | None = None
+    next_step: str | None = None
     created_at: datetime

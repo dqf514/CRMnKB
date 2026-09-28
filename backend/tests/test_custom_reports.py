@@ -490,3 +490,52 @@ def test_strip_think_noop_when_absent():
 
     assert _strip_think("正文内容") == "正文内容"
     assert _strip_think("") == ""
+
+
+# ========== Agent 模式任务指令（纯函数） ==========
+
+
+def test_agent_task_prompt_custom_includes_tools_and_scope():
+    text = report_svc.build_agent_task_prompt(
+        "custom",
+        prompt="基于产品资料写竞品分析",
+        kb_names=["产品库", "竞品库"],
+        extra_context="【附件】\n某文件全文",
+        language="zh",
+    )
+    assert "kb_search" in text and "kb_read_doc" in text  # 告知可用检索工具
+    assert "产品库、竞品库" in text  # 知识库范围提示
+    assert "某文件全文" in text  # 指定文件全文内联
+    assert "报告需求：基于产品资料写竞品分析" in text
+    assert "只输出报告正文" in text
+
+
+def test_agent_task_prompt_data_report_inlines_aggregated_data():
+    text = report_svc.build_agent_task_prompt(
+        "customer_analysis",
+        data={"客户资料": {"姓名": "张三"}, "商机列表": ["商机A（金额 100）"]},
+        language="zh",
+    )
+    assert "客户分析报告" in text
+    assert "张三" in text and "商机A" in text  # 聚合数据直接内联，不要求检索
+    assert "kb_search" not in text
+
+
+def test_looks_degenerate():
+    assert report_svc.looks_degenerate("") is True
+    assert report_svc.looks_degenerate("短") is True
+    assert report_svc.looks_degenerate("!" * 251) is True  # 实测出现过的刷屏退化
+    assert report_svc.looks_degenerate("# 报告\n" + "正常正文内容。" * 20) is False
+
+
+def test_agent_task_prompt_custom_asks_markdown_not_html():
+    # 长上下文后直接吐完整 HTML 容易触发模型退化：agent 只产 Markdown，HTML 排版走单独调用
+    text = report_svc.build_agent_task_prompt("custom", prompt="写竞品分析", language="zh")
+    assert "Markdown" in text
+    assert "独立的 HTML" not in text
+
+
+def test_html_from_markdown_prompt():
+    msgs = report_svc.build_html_from_markdown_prompt("# 标题\n正文", "zh")
+    assert msgs[0]["role"] == "system" and "HTML" in msgs[0]["content"]
+    assert "# 标题" in msgs[1]["content"]

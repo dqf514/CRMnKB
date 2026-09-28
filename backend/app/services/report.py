@@ -10,9 +10,12 @@ from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
+from app.models.knowledge_base import KnowledgeBase
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
 from app.models.report import Report
+from app.models.user import User
+from app.services.acp_bridge import bridge
 from app.services.llm import resolve_chat_llm, resolve_embed_llm
 from app.services.rag import (
     EmbeddingUnavailable,
@@ -288,6 +291,142 @@ def build_revise_prompt(instruction: str, html: str) -> list[dict]:
     ]
 
 
+async def _kb_names(session: AsyncSession, tenant_id: int, kb_ids: list[int] | None) -> list[str]:
+    """按 id 取知识库名称（agent 模式的检索范围提示用，仅作软约束写进任务指令）。"""
+    if not kb_ids:
+        return []
+    rows = (
+        await session.execute(
+            select(KnowledgeBase.name).where(
+                KnowledgeBase.id.in_(kb_ids), KnowledgeBase.tenant_id == tenant_id
+            )
+        )
+    ).scalars().all()
+    return [n for n in rows if n]
+
+
+def build_agent_task_prompt(
+    report_type: str,
+    *,
+    data: dict | None = None,
+    prompt: str | None = None,
+    kb_names: list[str] | None = None,
+    extra_context: str = "",
+    language: str = "zh",
+) -> str:
+    """Agent 模式的任务指令（纯函数）：把报告需求交给 dsh agent，由其自行规划
+    检索（kb_search/kb_read_doc）/阅读/撰写，产出报告正文。
+
+    - 数据类报告（客户分析/销售周报月报）：数据已聚合好，直接内联，无需检索；
+    - 自定义报告：给需求 + 可选知识库范围提示 + 指定文件全文内联，agent 自行检索补充。
+
+    统一要求输出 **Markdown**：长上下文多步工具调用后直接吐完整 HTML 容易触发模型
+    退化（实测出现整段 "!!!" 刷屏），custom 的 HTML 排版由后续单独的排版调用完成。
+    """
+    if report_type == "custom":
+        parts = [
+            "你是专业商务报告撰写助手。基于资料与用户需求撰写一份结构完整的 Markdown 格式报告"
+            "（标题层级、表格、要点列表）。不要编造资料中没有的事实。"
+            + _lang_instruction(language),
+            "你可以使用知识库工具 kb_search（语义检索）与 kb_read_doc（按文档读全文）获取资料，"
+            "需要最新公开信息时也可以联网搜索；多查几轮、交叉核实后再动笔。",
+        ]
+        if kb_names:
+            parts.append("重点知识库（优先在这些范围内检索）：" + "、".join(kb_names))
+        if extra_context.strip():
+            parts.append(f"用户指定的附加资料（文件全文）：\n{extra_context}")
+        parts.append(f"报告需求：{prompt}")
+    else:
+        msgs = build_report_prompt(report_type, data or {}, language)
+        parts = [msgs[0]["content"], msgs[1]["content"]]
+    parts.append("完成后只输出报告正文本身，不要输出任何解释、前后缀或代码围栏。")
+    return "\n\n".join(parts)
+
+
+def build_html_from_markdown_prompt(markdown_text: str, language: str = "zh") -> list[dict]:
+    """把 Agent 产出的 Markdown 报告排版成完整独立 HTML（纯函数）。"""
+    system = (
+        "你是专业商务报告排版助手。把给定的 Markdown 报告内容转换成一份完整、独立的 HTML 报告文档。"
+        "要求：使用内联 CSS 做专业商务排版（标题层级、表格、要点列表），采用语义化标签；"
+        "如需图表，用纯 HTML/CSS（如色块条形图）实现，禁止使用 JavaScript 或外部资源；"
+        "不得增删报告中的事实内容。只输出 HTML 文档本身，不要输出 markdown 代码围栏或任何解释。"
+        + _lang_instruction(language, html=True)
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"报告 Markdown：\n{(markdown_text or '')[:30000]}"},
+    ]
+
+
+def looks_degenerate(text: str) -> bool:
+    """Agent 输出退化检测（纯函数）：过短或单字符刷屏（如 "!!!…"）视为异常，触发固定管线兜底。"""
+    t = (text or "").strip()
+    if len(t) < 80:
+        return True
+    from collections import Counter
+
+    top = Counter(t).most_common(1)[0][1]
+    return top / len(t) > 0.7
+
+
+async def _run_agent_turn(session: AsyncSession, report: Report, user: User, dsh_sid: str, prompt: str) -> str:
+    """跑一轮 agent 对话并返回最终文本；工具调用/正文增量写回 progress/content。"""
+    parts: list[str] = []
+    last_commit = _time.monotonic()
+    final_response = ""
+    async for ev in bridge.run_turn(user, dsh_sid, prompt):
+        kind = ev.get("kind")
+        if kind == "error":
+            raise RuntimeError(ev.get("detail") or "dsh 运行失败")
+        if kind == "done":
+            final_response = ev.get("final_response") or ""
+            break
+        # kind == "event"：工具调用显示为进度；正文 chunk 累积并周期写回（前端滚动展示）
+        event = ev.get("event") or {}
+        upd = event.get("session_update")
+        if upd == "tool_call":
+            title = str(event.get("title") or "工具调用")
+            report.progress = f"Agent：{title[:60]}"
+        elif upd == "agent_message_chunk":
+            chunk = event.get("content") or {}
+            if chunk.get("type") == "text":
+                parts.append(chunk.get("text") or "")
+                report.progress = f"Agent 撰写中… {sum(len(p) for p in parts)} 字"
+        if _time.monotonic() - last_commit >= 2.0:
+            report.content = "".join(parts) or report.content
+            await session.commit()
+            last_commit = _time.monotonic()
+    return final_response or "".join(parts)
+
+
+# Agent 输出退化后的纠偏追问（实测 kimi-k2.6 在多步工具调用后的最终撰写步偶发整段 "!" 刷屏，
+# 同会话追问一次明确"不要调用工具、直接写正文"通常能恢复正常输出）
+_AGENT_RETRY_NUDGE = (
+    "你的上一次回复是乱码（一连串“!”），内容无效。现在请不要再调用任何工具，"
+    "直接基于已经收集到的资料，把完整的 Markdown 报告正文一次性写出来。"
+)
+
+
+async def _run_agent_report(session: AsyncSession, report: Report, task_prompt: str) -> str:
+    """Agent 模式生成正文：新建 dsh 会话跑 agent，退化时同会话纠偏重试一次。
+
+    失败抛异常，由 generate_report 统一标记 failed。"""
+    user = await session.get(User, report.user_id)
+    if user is None:
+        raise ValueError("报告属主用户不存在")
+    report.progress = "Agent 正在启动…"
+    await session.commit()
+    dsh_sid = await bridge.new_session(user)
+    content = await _run_agent_turn(session, report, user, dsh_sid, task_prompt)
+    if looks_degenerate(content):
+        logger.warning("报告 %s Agent 输出退化（%d 字），同会话纠偏重试", report.id, len(content))
+        report.progress = "Agent 输出异常，正在纠偏重试…"
+        report.content = None
+        await session.commit()
+        content = await _run_agent_turn(session, report, user, dsh_sid, _AGENT_RETRY_NUDGE)
+    return content
+
+
 async def aggregate_custom(
     db: AsyncSession,
     tenant_id: int,
@@ -389,13 +528,19 @@ async def generate_report(report_id: int) -> None:
             params = report.params or {}
             lang = (params.get("language") or "zh").lower()
             sources = None
+            use_agent = bool(params.get("agent"))
+            messages: list[dict] | None = None
+            agent_task: str | None = None
             if report.type == "customer_analysis":
                 report.progress = "正在汇总客户资料…"
                 await session.commit()
                 data = await aggregate_customer_analysis(
                     session, report.tenant_id, int(params["customer_id"])
                 )
-                messages = build_report_prompt(report.type, data, lang)
+                if use_agent:
+                    agent_task = build_agent_task_prompt(report.type, data=data, language=lang)
+                else:
+                    messages = build_report_prompt(report.type, data, lang)
             elif report.type in ("sales_weekly", "sales_monthly"):
                 report.progress = "正在统计销售数据…"
                 await session.commit()
@@ -403,40 +548,100 @@ async def generate_report(report_id: int) -> None:
                 start = date.fromisoformat(params.get("start_date") or str(default_start))
                 end = date.fromisoformat(params.get("end_date") or str(default_end))
                 data = await aggregate_sales(session, report.tenant_id, start, end)
-                messages = build_report_prompt(report.type, data, lang)
+                if use_agent:
+                    agent_task = build_agent_task_prompt(report.type, data=data, language=lang)
+                else:
+                    messages = build_report_prompt(report.type, data, lang)
             elif report.type == "custom":
-                report.progress = "正在检索知识库资料…"
-                await session.commit()
-                result = await aggregate_custom(
-                    session, report.tenant_id, params["prompt"],
-                    params.get("kb_ids"), params.get("file_ids"),
-                )
-                sources = result["sources"]
-                messages = build_custom_report_prompt(params["prompt"], result["context"], lang)
+                if use_agent:
+                    # Agent 模式：kb_ids 只作检索范围提示（软约束），file_ids 小件内联全文
+                    report.progress = "Agent 正在准备资料…"
+                    await session.commit()
+                    kb_names = await _kb_names(session, report.tenant_id, params.get("kb_ids"))
+                    extra = ""
+                    if params.get("file_ids"):
+                        from app.services.file_context import build_direct_file_context
+
+                        direct = await build_direct_file_context(
+                            session, report.tenant_id, params["file_ids"]
+                        )
+                        if not direct["too_large"]:
+                            extra = direct["context"]
+                    agent_task = build_agent_task_prompt(
+                        "custom", prompt=params["prompt"], kb_names=kb_names,
+                        extra_context=extra, language=lang,
+                    )
+                else:
+                    report.progress = "正在检索知识库资料…"
+                    await session.commit()
+                    result = await aggregate_custom(
+                        session, report.tenant_id, params["prompt"],
+                        params.get("kb_ids"), params.get("file_ids"),
+                    )
+                    sources = result["sources"]
+                    messages = build_custom_report_prompt(params["prompt"], result["context"], lang)
             else:
                 raise ValueError(f"未知的报告类型: {report.type}")
 
             chat_llm = await resolve_chat_llm(caller="report", tenant_id=report.tenant_id, user_id=report.user_id)
             timeout = params.get("timeout")
-            # 流式生成 + 每 ~2s 增量写回 content/progress，前端轮询即可看到"滚动生成"
-            report.progress = "AI 正在生成报告…"
-            await session.commit()
-            parts: list[str] = []
-            last_commit = _time.monotonic()
-            async for token in chat_llm.chat_stream(messages, timeout=timeout):
-                parts.append(token)
-                if _time.monotonic() - last_commit >= 2.0:
-                    report.content = "".join(parts)
-                    report.progress = f"AI 生成中… {len(report.content)} 字"
+            agent_used = False
+            if agent_task is not None:
+                # Agent 模式：dsh 多步检索/阅读/撰写（Markdown 正文），增量写回（进度由工具事件驱动）
+                try:
+                    content = await _run_agent_report(session, report, agent_task)
+                except Exception as exc:
+                    # agent 运行失败（如模型配额 429）不应让报告整体失败：回退固定管线
+                    logger.warning("报告 %s Agent 运行失败，回退固定管线: %s", report_id, exc)
+                    content = ""
+                if looks_degenerate(content):
+                    # 模型长上下文偶发退化（如整段 "!!!" 刷屏）或运行失败：回退固定管线兜底
+                    if content:
+                        logger.warning("报告 %s Agent 输出退化（%d 字），回退固定管线", report_id, len(content))
+                    report.progress = "Agent 不可用，改用固定管线生成…"
+                    report.content = None
                     await session.commit()
-                    last_commit = _time.monotonic()
-            content = "".join(parts)
+                    if report.type == "custom":
+                        result = await aggregate_custom(
+                            session, report.tenant_id, params["prompt"],
+                            params.get("kb_ids"), params.get("file_ids"),
+                        )
+                        sources = result["sources"]
+                        messages = build_custom_report_prompt(params["prompt"], result["context"], lang)
+                    else:
+                        messages = build_report_prompt(report.type, data, lang)
+                else:
+                    agent_used = True
+            if not agent_used:
+                # 固定管线：流式生成 + 每 ~2s 增量写回 content/progress，前端轮询即可看到"滚动生成"
+                report.progress = "AI 正在生成报告…"
+                await session.commit()
+                parts: list[str] = []
+                last_commit = _time.monotonic()
+                async for token in chat_llm.chat_stream(messages, timeout=timeout):
+                    parts.append(token)
+                    if _time.monotonic() - last_commit >= 2.0:
+                        report.content = "".join(parts)
+                        report.progress = f"AI 生成中… {len(report.content)} 字"
+                        await session.commit()
+                        last_commit = _time.monotonic()
+                content = "".join(parts)
+            if not content.strip():
+                raise ValueError("报告正文为空")
             if report.type == "custom":
                 content = _strip_code_fence(_strip_think(content))
-                report.params = {**params, "sources": sources}
+                if agent_used:
+                    # Agent 产出的是 Markdown：单独一次排版调用转成完整独立 HTML
+                    report.progress = "正在排版 HTML…"
+                    report.content = content
+                    await session.commit()
+                    content = _strip_code_fence(_strip_think(
+                        await chat_llm.chat(build_html_from_markdown_prompt(content, lang), timeout=timeout)
+                    ))
+                report.params = {**params, "sources": sources, "agent_used": agent_used}
             else:
                 content = _strip_think(content)
-                report.params = dict(params)
+                report.params = {**dict(params), "agent_used": agent_used}
             report.content = content
             # 演示版：独立 16:9 HTML 幻灯片（best-effort，失败则演示按钮不可用）
             try:

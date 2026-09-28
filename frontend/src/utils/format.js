@@ -54,6 +54,15 @@ export const profileStatusMap = {
   failed: { label: '生成失败', type: 'danger' },
 }
 
+// 客户 DDQ（尽调问卷）状态
+export const ddqStatusMap = {
+  none: { label: '未开始', type: 'info' },
+  pending: { label: '进行中', type: 'warning' },
+  completed: { label: '已完成', type: 'success' },
+}
+
+// 客户文档资料类型已改为后端动态配置（stores/docCategories.js），此处不再保留静态映射
+
 export const taskTypeMap = {
   follow_up: { label: '跟进', type: 'primary' },
   meeting: { label: '会议', type: 'success' },

@@ -124,8 +124,15 @@ function onKeydown(e) {
   }
 }
 
-onMounted(() => window.addEventListener('keydown', onKeydown))
-onUnmounted(() => window.removeEventListener('keydown', onKeydown))
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  // 侧栏「搜索」按钮通过自定义事件打开（与 Ctrl+K 同一入口）
+  window.addEventListener('kb:open-global-search', open_)
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('kb:open-global-search', open_)
+})
 </script>
 
 <style scoped>

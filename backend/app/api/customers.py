@@ -9,13 +9,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.models.customer import Customer
+from app.models.follow_up import FollowUpRecord
+from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.schemas.customer import (
+    DDQ_STATUSES,
     CustomerCreate,
     CustomerListOut,
     CustomerOut,
     CustomerProfileOut,
     CustomerUpdate,
+    EmailDraftOut,
+    EmailDraftRequest,
 )
 from app.schemas.kb import KbOut
 from app.services.audit import record_audit
@@ -26,7 +31,10 @@ from app.services.customer_io import (
     find_duplicate_customers,
     parse_customers_xlsx,
 )
+from app.services.email_draft import build_email_draft_prompt, parse_email_draft
 from app.services.kb import get_or_create_customer_kb
+from app.services.llm import resolve_chat_llm
+from app.services.pipeline_brief import generate_brief
 from app.services.profile import generate_profile
 
 logger = logging.getLogger(__name__)
@@ -44,6 +52,7 @@ def _customer_filter_stmt(
     status: str | None = None,
     industry: str | None = None,
     tag: str | None = None,
+    ddq_status: str | None = None,
 ):
     """客户列表/导出共用的筛选（默认排除已软删）。"""
     stmt = select(Customer).where(
@@ -61,6 +70,8 @@ def _customer_filter_stmt(
         )
     if status:
         stmt = stmt.where(Customer.status == status)
+    if ddq_status:
+        stmt = stmt.where(Customer.ddq_status == ddq_status)
     if industry:
         # JSONB ? 操作符：industries 数组包含该行业名称即命中
         stmt = stmt.where(Customer.industries.has_key(industry))  # noqa: W601
@@ -75,12 +86,13 @@ async def list_customers(
     status: str | None = Query(None),
     industry: str | None = Query(None),
     tag: str | None = Query(None),
+    ddq_status: str | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    stmt = _customer_filter_stmt(user.tenant_id, keyword, status, industry, tag)
+    stmt = _customer_filter_stmt(user.tenant_id, keyword, status, industry, tag, ddq_status)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     stmt = stmt.order_by(Customer.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(stmt)
@@ -236,6 +248,12 @@ async def update_customer(
 ):
     customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
     updates = body.model_dump(exclude_unset=True)
+    # ddq_status 取值手工校验（schema 层用 Literal 会返回 422，契约要求 400）
+    if "ddq_status" in updates and updates["ddq_status"] not in DDQ_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"ddq_status 仅支持 {'/'.join(DDQ_STATUSES)}",
+        )
     for field, value in updates.items():
         setattr(customer, field, value)
     record_audit(
@@ -345,3 +363,54 @@ async def generate_customer_profile(
     await db.commit()
     background_tasks.add_task(generate_profile, customer.id)
     return {"status": "generating"}
+
+
+# ---------------------------------------------------------------------------
+# P1 Pipeline 阶段简报 / P2 AI 邮件草稿
+# ---------------------------------------------------------------------------
+
+@router.post("/{customer_id}/brief/refresh", status_code=202)
+async def refresh_customer_brief(
+    customer_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """后台重新生成 AI 阶段简报（结果写回 customer.ai_brief，随客户详情下发）。"""
+    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    background_tasks.add_task(generate_brief, customer.id)
+    return {"ok": True}
+
+
+@router.post("/{customer_id}/email-draft", response_model=EmailDraftOut)
+async def create_email_draft(
+    customer_id: int,
+    body: EmailDraftRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """AI 邮件草稿：客户资料 + 阶段简报 + 最近 5 条跟进 + Email Guide + 用户意图 → LLM。"""
+    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    guide_row = await db.get(SystemSetting, "email_guide")
+    guide = (guide_row.value or "") if guide_row else ""
+    followups = (
+        (
+            await db.execute(
+                select(FollowUpRecord)
+                .where(FollowUpRecord.customer_id == customer_id)
+                .order_by(FollowUpRecord.created_at.desc())
+                .limit(5)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    prompt = build_email_draft_prompt(
+        customer, followups, customer.ai_brief, guide, body.intent, body.language
+    )
+    chat_llm = await resolve_chat_llm(caller="email_draft", tenant_id=user.tenant_id)
+    text = await chat_llm.chat(prompt)
+    draft = parse_email_draft(text)
+    if not draft:
+        raise HTTPException(status_code=502, detail="AI 草稿生成失败，请重试")
+    return EmailDraftOut(**draft)

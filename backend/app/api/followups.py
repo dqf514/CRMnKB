@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.followup import FollowUpCreate, FollowUpOut
 from app.services.ai_tasks import extract_and_create_tasks
 from app.services.llm import resolve_chat_llm
+from app.services.pipeline_brief import generate_brief
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +84,13 @@ async def create_followup(
         user_id=user.id,
         type=body.type,
         content=body.content,
+        next_step=body.next_step,
     )
     db.add(record)
     await db.commit()
     await db.refresh(record)
     background_tasks.add_task(generate_ai_summary, record.id)
     background_tasks.add_task(extract_and_create_tasks, record.id)
+    # 跟进变化后异步刷新客户 AI 阶段简报
+    background_tasks.add_task(generate_brief, customer_id)
     return record

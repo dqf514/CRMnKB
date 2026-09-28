@@ -5,6 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.api.deps import get_current_user, get_db
 from app.models.customer import Customer
 from app.models.knowledge_base import KnowledgeBase
@@ -140,6 +141,12 @@ async def generate(
     if body.language not in ("zh", "en", "zh_en"):
         raise HTTPException(status_code=400, detail="language 仅支持 zh / en / zh_en")
     params["language"] = body.language
+
+    # Agent 模式：依赖 dsh 基座总开关，关闭时直接拒绝（前端开关也随之下架，双保险）
+    if body.agent:
+        if not settings.DSH_AGENT_ENABLED:
+            raise HTTPException(status_code=400, detail="Agent 模式未启用（DSH_AGENT_ENABLED 关闭）")
+        params["agent"] = True
 
     report = Report(
         tenant_id=user.tenant_id,

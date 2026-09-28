@@ -16,6 +16,8 @@ class ReportGenerateRequest(BaseModel):
     timeout: int | None = Field(default=None, ge=30, le=600)
     # 报告语言：zh=中文 / en=英文 / zh_en=中英双语（HTML 版本可切换显示）
     language: str = "zh"
+    # Agent 模式：交给 dsh agent 规划检索/阅读/撰写（需 DSH_AGENT_ENABLED），否则走固定管线单次 LLM 生成
+    agent: bool = False
 
 
 class ReportReviseRequest(BaseModel):

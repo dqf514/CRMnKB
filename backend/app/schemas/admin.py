@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.schemas.auth import CN_MOBILE_PATTERN, _normalize_phone
 
 
 # ---------- 用户与分组 ----------
@@ -10,6 +12,7 @@ class AdminUserOut(BaseModel):
     username: str
     name: str
     email: str | None = None
+    phone: str | None = None
     role: str
     group_id: int | None = None
     group_name: str | None = None
@@ -30,14 +33,20 @@ class AdminUserCreate(BaseModel):
     role: str = "user"
     group_id: int | None = None
     email: str | None = None
+    phone: str | None = Field(None, pattern=CN_MOBILE_PATTERN)
+
+    _norm_phone = field_validator("phone", mode="before")(_normalize_phone)
 
 
 class AdminUserUpdate(BaseModel):
     name: str | None = None
     email: str | None = None
+    phone: str | None = Field(None, pattern=CN_MOBILE_PATTERN)
     role: str | None = None
     group_id: int | None = None
     status: int | None = None
+
+    _norm_phone = field_validator("phone", mode="before")(_normalize_phone)
 
 
 class AdminPasswordReset(BaseModel):

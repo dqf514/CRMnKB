@@ -1,110 +1,113 @@
 <template>
   <el-container class="layout">
-    <!-- 桌面端固定侧边栏（可折叠） -->
-    <el-aside v-if="!isMobile" :width="sidebarCollapsed ? '64px' : '216px'" class="aside">
-      <div class="logo" :class="{ collapsed: sidebarCollapsed }">
-        <img class="logo-img" :src="brandStore.logoUrl" :alt="brandStore.systemName" />
-        <span v-if="!sidebarCollapsed" class="logo-text">{{ brandStore.systemName }}</span>
+    <!-- 桌面端固定侧边栏（240px，Manus 风：品牌 → 新的任务/搜索 → 工作区列表 → 底部导航 → 用户行） -->
+    <el-aside v-if="!isMobile" width="240px" class="aside">
+      <!-- 品牌行 -->
+      <div class="brand">
+        <img class="brand-logo" :src="brandStore.logoUrl" :alt="brandStore.systemName" />
+        <span class="brand-name">{{ brandStore.systemName }}</span>
       </div>
-      <el-menu :default-active="activeMenu" router class="side-menu" :collapse="sidebarCollapsed" :collapse-transition="false" :background-color="'transparent'" :text-color="'var(--app-ink-2)'">
-        <template v-for="m in menus" :key="m.path">
-          <!-- 客户管理：子菜单聚合 客户/任务提醒/工作流，导航更干净 -->
-          <el-sub-menu v-if="m.children" :index="m.path">
-            <template #title>
-              <el-icon><component :is="m.icon" /></el-icon>
-              <span>{{ m.label }}</span>
-            </template>
-            <el-menu-item v-for="c in m.children" :key="c.path" :index="c.path">
-              <el-icon><component :is="c.icon" /></el-icon>
-              <template #title>{{ c.label }}</template>
-            </el-menu-item>
-          </el-sub-menu>
-          <el-menu-item v-else :index="m.path">
-            <el-icon><component :is="m.icon" /></el-icon>
-            <template #title>{{ m.label }}</template>
-          </el-menu-item>
-        </template>
-        <el-sub-menu v-if="isAdmin" index="admin-group">
-          <template #title>
-            <el-icon><Setting /></el-icon>
-            <span>系统管理</span>
-          </template>
-          <el-sub-menu v-for="g in adminGroups" :key="g.key" :index="'admin-' + g.key">
-            <template #title>
-              <span>{{ g.label }}</span>
-            </template>
-            <el-menu-item v-for="m in g.items" :key="m.path" :index="m.path">
-              <el-icon><component :is="m.icon" /></el-icon>
-              <template #title>{{ m.label }}</template>
-            </el-menu-item>
-          </el-sub-menu>
-        </el-sub-menu>
-      </el-menu>
-    </el-aside>
 
-    <el-container>
-      <el-header class="header">
-        <div class="header-left">
-          <el-tooltip :content="sidebarCollapsed ? '展开菜单' : '折叠菜单'" placement="bottom">
-            <el-button v-if="!isMobile" link class="collapse-btn" :icon="sidebarCollapsed ? Expand : Fold" @click="toggleSidebar" />
-          </el-tooltip>
-          <img v-if="isMobile" class="logo-img logo-img-sm" :src="brandStore.logoUrl" :alt="brandStore.systemName" />
-          <span class="page-title">{{ route.meta.title || '' }}</span>
-        </div>
-        <div class="header-right">
-          <!-- 字号切换 -->
-          <el-popover placement="bottom-end" :width="150" trigger="click">
-            <template #reference>
-              <span class="header-icon fs-trigger" title="字号">A</span>
-            </template>
-            <div class="font-size-panel">
-              <div class="fs-opt-title">字号</div>
-              <button
-                v-for="(o, k) in FONT_SIZES"
-                :key="k"
-                class="fs-opt"
-                :class="{ active: themeStore.fontSize === k }"
-                @click="themeStore.setFontSize(k)"
-              >
-                <span class="fs-a" :style="{ fontSize: o.size }">A</span>
-                <span>{{ o.label }}</span>
-              </button>
+      <!-- 主操作：新的任务 + 搜索 -->
+      <div class="side-actions">
+        <button class="btn-new-task" @click="createNewTask">
+          <el-icon :size="15"><Plus /></el-icon>
+          <span>新的任务</span>
+        </button>
+        <button class="btn-search" @click="openGlobalSearch">
+          <el-icon :size="15"><Search /></el-icon>
+          <span>搜索</span>
+          <kbd class="kbd">Ctrl K</kbd>
+        </button>
+      </div>
+
+      <!-- 中部弹性滚动区：工作区列表；admin 处于 /admin 路由时替换为管理菜单 -->
+      <div class="side-scroll">
+        <template v-if="showAdminMenu">
+          <div v-for="g in adminGroups" :key="g.key" class="side-group">
+            <div class="side-group-label">{{ g.label }}</div>
+            <div
+              v-for="m in g.items"
+              :key="m.path"
+              class="nav-item"
+              :class="{ active: isNavActive(m.path) }"
+              @click="router.push(m.path)"
+            >
+              <el-icon :size="16"><component :is="m.icon" /></el-icon>
+              <span>{{ m.label }}</span>
             </div>
-          </el-popover>
-          <!-- 明暗切换 -->
-          <el-tooltip :content="themeStore.mode === 'dark' ? '切换到亮色' : '切换到暗色'" placement="bottom">
-            <el-icon :size="18" class="header-icon" @click="themeStore.toggleMode()">
-              <Sunny v-if="themeStore.mode === 'dark'" />
-              <Moon v-else />
-            </el-icon>
-          </el-tooltip>
-          <!-- 主题色 -->
-          <el-popover placement="bottom-end" :width="216" trigger="click">
-            <template #reference>
-              <el-icon :size="18" class="header-icon"><Brush /></el-icon>
-            </template>
-            <div class="accent-panel">
-              <div class="accent-title">主题色</div>
-              <div class="accent-list">
-                <span
-                  v-for="(v, k) in ACCENTS"
-                  :key="k"
-                  class="accent-swatch"
-                  :class="{ active: themeStore.accent === k }"
-                  :style="{ background: v.color }"
-                  :title="v.label"
-                  @click="themeStore.setAccent(k)"
-                >
-                  <el-icon v-if="themeStore.accent === k" :size="14" color="#fff"><Check /></el-icon>
-                </span>
+          </div>
+        </template>
+        <template v-else>
+          <div class="side-group-label">工作区</div>
+          <SidebarWorkspaces />
+        </template>
+      </div>
+
+      <div class="side-divider" />
+
+      <!-- 底部导航组 -->
+      <nav class="side-nav">
+        <template v-for="item in navItems" :key="item.key || item.path">
+          <!-- 带子项的分组：点组头展开/收起，子项缩进排列 -->
+          <template v-if="item.children">
+            <div
+              class="nav-item"
+              :class="{ active: isGroupActive(item) }"
+              @click="toggleGroup(item.key)"
+            >
+              <el-icon :size="16"><component :is="item.icon" /></el-icon>
+              <span>{{ item.label }}</span>
+              <el-icon :size="12" class="nav-caret" :class="{ open: groupOpen[item.key] }">
+                <ArrowDown />
+              </el-icon>
+            </div>
+            <div v-show="groupOpen[item.key]" class="nav-children">
+              <div
+                v-for="c in item.children"
+                :key="c.path"
+                class="nav-item nav-child"
+                :class="{ active: isNavActive(c.path) }"
+                @click="router.push(c.path)"
+              >
+                <el-icon :size="15"><component :is="c.icon" /></el-icon>
+                <span>{{ c.label }}</span>
               </div>
             </div>
-          </el-popover>
+          </template>
+          <div
+            v-else
+            class="nav-item"
+            :class="{ active: isNavActive(item.path) }"
+            @click="router.push(item.path)"
+          >
+            <el-icon :size="16"><component :is="item.icon" /></el-icon>
+            <span>{{ item.label }}</span>
+          </div>
+        </template>
+      </nav>
+
+      <!-- 用户行：头像姓名（下拉：个人中心/同步App/退出）+ 通知 + 明暗 + 设置(admin) -->
+      <div class="user-row">
+        <el-dropdown trigger="click" @command="handleCommand">
+          <span class="user-info">
+            <el-icon><Avatar /></el-icon>
+            <span class="user-name">{{ authStore.user?.name || authStore.user?.username || '用户' }}</span>
+          </span>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="profile">个人中心</el-dropdown-item>
+              <el-dropdown-item command="syncapp">下载同步 App</el-dropdown-item>
+              <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+        <div class="user-actions">
           <!-- 通知铃铛 -->
-          <el-popover placement="bottom-end" :width="360" trigger="click" @show="loadNotifications">
+          <el-popover placement="top-end" :width="360" trigger="click" @show="loadNotifications">
             <template #reference>
               <el-badge :value="unreadCount" :hidden="!unreadCount" :max="99" class="bell-badge">
-                <el-icon :size="18" class="header-icon"><Bell /></el-icon>
+                <el-icon :size="17" class="icon-btn"><Bell /></el-icon>
               </el-badge>
             </template>
             <div class="notif-header">
@@ -126,30 +129,71 @@
               <el-empty v-if="!notifLoading && !notifications.length" description="暂无通知" :image-size="60" />
             </div>
           </el-popover>
-          <!-- 用户 -->
-          <!-- trigger=click：悬停弹出在 zoom 缩放下会致 popper 定位偏移→页面抖动，改为点击展开 -->
-          <el-dropdown trigger="click" @command="handleCommand">
-            <span class="user-info">
-              <el-icon><Avatar /></el-icon>
-              <span v-if="!isMobile">{{ authStore.user?.name || authStore.user?.username || '用户' }}</span>
-              <el-icon v-if="!isMobile"><ArrowDown /></el-icon>
-            </span>
-            <template #dropdown>
-              <el-dropdown-menu>
-                <el-dropdown-item command="profile">个人中心</el-dropdown-item>
-                <el-dropdown-item command="syncapp">下载同步 App</el-dropdown-item>
-                <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
-              </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <!-- 明暗切换（主题色/字号在「个人中心」里设置） -->
+          <el-tooltip :content="themeStore.mode === 'dark' ? '切换到亮色' : '切换到暗色'" placement="top">
+            <el-icon :size="17" class="icon-btn" @click="themeStore.toggleMode()">
+              <Sunny v-if="themeStore.mode === 'dark'" />
+              <Moon v-else />
+            </el-icon>
+          </el-tooltip>
+          <!-- 系统设置入口（仅 admin） -->
+          <el-tooltip v-if="isAdmin" content="系统设置" placement="top">
+            <el-icon :size="17" class="icon-btn" @click="router.push('/admin/system')">
+              <Setting />
+            </el-icon>
+          </el-tooltip>
         </div>
+      </div>
+    </el-aside>
+
+    <el-container>
+      <!-- 移动端顶栏：品牌 + 铃铛 -->
+      <el-header v-if="isMobile" class="m-header">
+        <div class="m-brand">
+          <img class="brand-logo brand-logo-sm" :src="brandStore.logoUrl" :alt="brandStore.systemName" />
+          <span class="brand-name">{{ brandStore.systemName }}</span>
+        </div>
+        <el-popover placement="bottom-end" :width="360" trigger="click" @show="loadNotifications">
+          <template #reference>
+            <el-badge :value="unreadCount" :hidden="!unreadCount" :max="99" class="bell-badge">
+              <el-icon :size="18" class="icon-btn"><Bell /></el-icon>
+            </el-badge>
+          </template>
+          <div class="notif-header">
+            <span>通知</span>
+            <el-button link type="primary" size="small" @click="handleReadAll">全部已读</el-button>
+          </div>
+          <div class="notif-list" v-loading="notifLoading">
+            <div
+              v-for="n in notifications"
+              :key="n.id"
+              class="notif-item"
+              :class="{ unread: !n.is_read }"
+              @click="handleRead(n)"
+            >
+              <div class="notif-title">{{ n.title }}</div>
+              <div class="notif-content">{{ n.content }}</div>
+              <div class="notif-time">{{ formatDateTime(n.created_at) }}</div>
+            </div>
+            <el-empty v-if="!notifLoading && !notifications.length" description="暂无通知" :image-size="60" />
+          </div>
+        </el-popover>
       </el-header>
+
       <el-main class="main">
+        <!-- 沙箱环境常驻横幅 -->
+        <el-alert
+          v-if="brandStore.env === 'sandbox'"
+          type="warning"
+          :closable="false"
+          title="沙箱环境：当前数据用于试用验证，正式上线前将清空"
+          style="margin-bottom: 16px"
+        />
         <router-view />
       </el-main>
     </el-container>
 
-    <!-- 移动端底部标签栏 -->
+    <!-- 移动端底部标签栏：今日/工作台/知识库/客户/更多 -->
     <nav v-if="isMobile" class="tabbar">
       <div
         v-for="t in tabItems"
@@ -167,7 +211,7 @@
       </div>
     </nav>
 
-    <!-- 更多菜单面板 -->
+    <!-- 更多菜单面板（移动端） -->
     <el-drawer v-model="moreDrawer" direction="btt" size="auto" title="更多功能" class="more-drawer">
       <div class="more-list">
         <div
@@ -201,26 +245,28 @@
 
     <!-- 全局上传进度（右下角悬浮 + 侧边栏面板） -->
     <UploadProgressPanel />
-    <!-- 全局搜索（Ctrl+K） -->
+    <!-- 全局搜索（Ctrl+K / 侧栏「搜索」按钮） -->
     <GlobalSearch />
   </el-container>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   User, UserFilled, List, SetUp, Collection, Avatar, ArrowDown, Bell, Notebook,
-  Sunny, Moon, Brush, Check, Files, MoreFilled, ArrowRight, Fold, Expand,
+  Sunny, Moon, Files, MoreFilled, ArrowRight, Plus, Search,
   Setting, Cpu, DataAnalysis, Monitor, WarningFilled, Delete, Tickets, MagicStick, Connection,
   Stamp,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
 import { useBrandStore } from '../stores/brand'
-import { useThemeStore, ACCENTS, FONT_SIZES } from '../stores/theme'
+import { useThemeStore } from '../stores/theme'
+import { useStudioStore } from '../stores/studio'
 import UploadProgressPanel from '../components/UploadProgressPanel.vue'
 import GlobalSearch from '../components/GlobalSearch.vue'
+import SidebarWorkspaces from '../components/SidebarWorkspaces.vue'
 import { getNotifications, markNotificationRead, markAllNotificationsRead, downloadSyncApp, getSyncAppVersion } from '../api'
 import { formatDateTime } from '../utils/format'
 
@@ -229,15 +275,20 @@ const router = useRouter()
 const authStore = useAuthStore()
 const brandStore = useBrandStore()
 const themeStore = useThemeStore()
+const studioStore = useStudioStore()
 
-const menus = [
+// 底部导航组：今日 / 知识中心（知识库+文档库）/ 客户管理（客户+任务+工作流）/ Agent 审批
+const navItems = [
   { path: '/today', label: '今日', icon: Sunny },
-  { path: '/studio', label: '工作台', icon: Notebook },
-  { path: '/knowledge', label: '知识库', icon: Collection },
-  { path: '/library', label: '文档库', icon: Files },
-  // 客户板块聚合 CRM 相关页：客户/任务提醒/工作流（桌面端子菜单，移动端在"更多"里平铺）
   {
-    path: '/customers', label: '客户管理', icon: User,
+    key: 'knowledge', label: '知识中心', icon: Collection,
+    children: [
+      { path: '/knowledge', label: '知识库', icon: Collection },
+      { path: '/library', label: '文档库', icon: Files },
+    ],
+  },
+  {
+    key: 'customers', label: '客户管理', icon: User,
     children: [
       { path: '/customers', label: '客户列表', icon: User },
       { path: '/tasks', label: '任务提醒', icon: List },
@@ -247,16 +298,13 @@ const menus = [
   { path: '/agent-approvals', label: 'Agent 审批', icon: Stamp },
 ]
 
-// 移动端底部标签栏：前四项 + 更多
-const tabItems = menus.slice(0, 4).map((m) => ({
-  path: m.path,
-  label: { 客户管理: '客户', 'AI 工作台': 'AI 工作台' }[m.label] || m.label,
-  icon: m.icon,
-}))
-// "更多"面板平铺子菜单项
-const moreMenus = menus.slice(4).flatMap((m) => m.children || [m])
+// 导航分组展开状态（默认展开）
+const groupOpen = reactive({ knowledge: true, customers: true })
+function toggleGroup(key) {
+  groupOpen[key] = !groupOpen[key]
+}
 
-// 系统管理菜单（仅 admin），按职能分组聚合，避免展开过长
+// 系统管理菜单（仅 admin），按职能分组聚合；admin 处于 /admin 路由时替换侧栏工作区列表
 const isAdmin = computed(() => authStore.user?.role === 'admin')
 const adminGroups = [
   {
@@ -290,6 +338,33 @@ const adminGroups = [
   },
 ]
 const adminPaths = adminGroups.flatMap((g) => g.items.map((m) => m.path))
+const showAdminMenu = computed(() => isAdmin.value && route.path.startsWith('/admin'))
+
+// ========== 侧栏主操作 ==========
+// 「新的任务」：新建工作区并跳到工作台（沿用 Studio 原 TopBar 的新建逻辑）
+async function createNewTask() {
+  const { value: name } = await ElMessageBox.prompt('输入新工作区名称', '新的任务', {
+    inputPattern: /.+/,
+    inputErrorMessage: '名称不能为空',
+    inputPlaceholder: '如：Q3 客户投诉分析',
+  }).catch(() => ({ value: null }))
+  if (!name) return
+  const nb = await studioStore.createNotebook({
+    name,
+    description: '',
+    source_kb_ids: [],
+    source_file_ids: [],
+  })
+  ElMessage.success('已创建')
+  await studioStore.openNotebook(nb.id)
+  await studioStore.loadChatHistory(nb.id)
+  router.push('/studio')
+}
+
+// 「搜索」：与 Ctrl+K 同一入口（GlobalSearch 监听该自定义事件）
+function openGlobalSearch() {
+  window.dispatchEvent(new Event('kb:open-global-search'))
+}
 
 // ========== 响应式 ==========
 const isMobile = ref(window.innerWidth < 992)
@@ -299,23 +374,30 @@ function onResize() {
   if (!isMobile.value) moreDrawer.value = false
 }
 
-// 侧边栏折叠（记住状态）
-const sidebarCollapsed = ref(localStorage.getItem('sidebar-collapsed') === '1')
-function toggleSidebar() {
-  sidebarCollapsed.value = !sidebarCollapsed.value
-  localStorage.setItem('sidebar-collapsed', sidebarCollapsed.value ? '1' : '0')
+// 移动端底部标签栏：今日/工作台/知识库/客户 + 更多
+const tabItems = [
+  { path: '/today', label: '今日', icon: Sunny },
+  { path: '/studio', label: '工作台', icon: Notebook },
+  { path: '/knowledge', label: '知识库', icon: Collection },
+  { path: '/customers', label: '客户', icon: User },
+]
+// "更多"面板平铺项：文档库/任务提醒/工作流/Agent 审批
+const moreMenus = [
+  { path: '/library', label: '文档库', icon: Files },
+  { path: '/tasks', label: '任务提醒', icon: List },
+  { path: '/workflows', label: '工作流', icon: SetUp },
+  { path: '/agent-approvals', label: 'Agent 审批', icon: Stamp },
+]
+
+function isNavActive(path) {
+  return route.path === path || route.path.startsWith(path + '/')
 }
-
-const activeMenu = computed(() => {
-  if (route.path.startsWith('/customers')) return '/customers'
-  if (route.path.startsWith('/knowledge')) return '/knowledge'
-  return route.path
-})
-
+function isGroupActive(item) {
+  return (item.children || []).some((c) => isNavActive(c.path))
+}
 function isTabActive(path) {
   return route.path === path || route.path.startsWith(path + '/')
 }
-
 const isMoreActive = computed(() =>
   moreMenus.some((m) => isTabActive(m.path)) || adminPaths.some((p) => isTabActive(p))
 )
@@ -450,182 +532,238 @@ onUnmounted(() => {
   height: calc(100vh / var(--app-zoom, 1));
   overflow: hidden;
 }
+
+/* ========== 侧栏（Manus 风：浅灰底、圆角菜单项） ========== */
 .aside {
-  background: var(--app-surface);
+  background: var(--sidebar-bg);
   border-right: 1px solid var(--app-line);
-  transition: width 0.2s ease;
-  overflow-x: hidden;
-}
-.logo {
-  height: var(--app-header-h);
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 0 18px;
+  flex-direction: column;
   overflow: hidden;
 }
-.logo.collapsed {
-  justify-content: center;
-  padding: 0 8px;
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 16px 10px;
 }
-.collapse-btn {
-  font-size: 18px;
-  color: var(--app-ink-2);
-  margin-right: 8px;
-}
-.collapse-btn:hover {
-  color: var(--el-color-primary);
-}
-.logo-img {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  flex: none;
-  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
-}
-.logo-img-sm {
+.brand-logo {
   width: 26px;
   height: 26px;
   border-radius: 7px;
+  flex: none;
+  box-shadow: 0 4px 12px rgba(37, 99, 235, 0.28);
+}
+.brand-logo-sm {
+  width: 24px;
+  height: 24px;
   box-shadow: none;
 }
-.logo-text {
-  font-size: 16px;
+.brand-name {
+  font-size: 14px;
   font-weight: 700;
   letter-spacing: 0.02em;
   color: var(--app-ink);
   white-space: nowrap;
-}
-.side-menu {
-  border-right: none;
-}
-.side-menu:not(.el-menu--collapse) {
-  background: transparent;
-}
-.header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  height: var(--app-header-h);
-  border-bottom: 1px solid var(--app-line);
-  background: var(--app-surface);
-  padding: 0 20px;
-}
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  min-width: 0;
-}
-.page-title {
-  font-size: 16px;
-  font-weight: 600;
-  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.header-right {
+
+/* 主操作按钮 */
+.side-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 12px 10px;
+}
+.btn-new-task {
   display: flex;
   align-items: center;
-  gap: 18px;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--el-color-primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.btn-new-task:hover {
+  background: var(--el-color-primary-dark-2);
+}
+.btn-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--app-line);
+  border-radius: 8px;
+  background: var(--app-surface);
+  color: var(--app-ink-2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.btn-search:hover {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+}
+.kbd {
+  margin-left: auto;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--app-ink-3);
+  border: 1px solid var(--app-line);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+/* 中部滚动区：工作区列表 / 管理菜单 */
+.side-scroll {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 2px 12px;
+  min-height: 0;
+}
+.side-group {
+  margin-bottom: 8px;
+}
+.side-group-label {
+  font-size: 12px;
+  color: var(--app-ink-3);
+  padding: 8px 10px 4px;
+}
+
+.side-divider {
+  height: 1px;
+  background: var(--app-line);
+  margin: 6px 16px;
   flex: none;
 }
-.header-icon {
+
+/* 底部导航组 */
+.side-nav {
+  flex: none;
+  padding: 4px 12px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--app-ink-2);
+  transition: background 0.15s ease, color 0.15s ease;
+  user-select: none;
+}
+.nav-item:hover {
+  background: var(--sidebar-hover);
+  color: var(--app-ink);
+}
+.nav-item.active {
+  background: var(--app-surface);
+  color: var(--app-ink);
+  font-weight: 600;
+  box-shadow: var(--app-shadow);
+}
+.nav-child {
+  font-size: 12.5px;
+  padding: 6px 10px;
+}
+.nav-children {
+  padding-left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.nav-caret {
+  margin-left: auto;
+  color: var(--app-ink-3);
+  transition: transform 0.15s ease;
+}
+.nav-caret.open {
+  transform: rotate(180deg);
+}
+
+/* 用户行 */
+.user-row {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--app-line);
+}
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--app-ink);
+  min-width: 0;
+  font-size: 13px;
+}
+.user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 84px;
+}
+.user-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+.icon-btn {
   cursor: pointer;
   color: var(--app-ink-2);
   vertical-align: middle;
   transition: color 0.15s ease;
 }
-.header-icon:hover {
+.icon-btn:hover {
   color: var(--el-color-primary);
-}
-.fs-trigger {
-  font-size: 18px;
-  font-weight: 400;
-  line-height: 1;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  user-select: none;
-}
-.font-size-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.fs-opt-title {
-  font-size: 12px;
-  color: var(--app-ink-2);
-  margin-bottom: 4px;
-}
-.fs-opt {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 10px;
-  border: none;
-  background: transparent;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--app-ink);
-  width: 100%;
-  text-align: left;
-}
-.fs-opt:hover {
-  background: var(--app-bg);
-}
-.fs-opt.active {
-  color: var(--el-color-primary);
-  font-weight: 600;
-}
-.fs-a {
-  width: 20px;
-  text-align: center;
-  font-weight: 700;
-  line-height: 1;
 }
 .bell-badge {
   line-height: 1;
 }
-.user-info {
+
+/* ========== 移动端顶栏（品牌 + 铃铛） ========== */
+.m-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  color: var(--app-ink);
+  justify-content: space-between;
+  height: 52px;
+  border-bottom: 1px solid var(--app-line);
+  background: var(--app-surface);
+  padding: 0 14px;
 }
+.m-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .main {
   background: var(--app-bg);
   padding: 20px;
   overflow-x: hidden;
 }
-.accent-title {
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-.accent-list {
-  display: flex;
-  gap: 10px;
-}
-.accent-swatch {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform 0.15s ease;
-}
-.accent-swatch:hover {
-  transform: scale(1.12);
-}
-.accent-swatch.active {
-  box-shadow: 0 0 0 2px var(--app-surface), 0 0 0 4px currentColor;
-}
+
+/* ========== 通知弹层 ========== */
 .notif-header {
   display: flex;
   align-items: center;
@@ -676,7 +814,7 @@ html.dark .notif-item.unread {
   opacity: 0.8;
 }
 
-/* 移动端底部标签栏 */
+/* ========== 移动端底部标签栏 ========== */
 .tabbar {
   position: fixed;
   left: 0;
@@ -749,12 +887,6 @@ html.dark .notif-item.unread {
 }
 
 @media (max-width: 991px) {
-  .header {
-    padding: 0 14px;
-  }
-  .header-right {
-    gap: 14px;
-  }
   .main {
     padding: 14px;
     /* 给底部标签栏留出空间（含刘海屏安全区） */

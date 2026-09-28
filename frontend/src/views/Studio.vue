@@ -1,85 +1,37 @@
 <template>
   <div class="studio">
-    <!-- TopBar -->
-    <div class="topbar">
-      <div class="topbar-left">
-        <el-tooltip content="选择知识库 / 文件" placement="bottom">
-          <el-button v-if="isMobile" :icon="Files" size="small" link @click="sourcesDrawer = true" />
-        </el-tooltip>
-        <!-- 工作区标签栏（类 OneNote：左右翻页；自己的/共享的用颜色区分；右键出菜单） -->
-        <div class="nb-tabbar">
-          <button class="nb-arrow" :disabled="!canScrollLeft" @click="scrollTabs(-1)" title="向左翻">
-            <el-icon><ArrowLeft /></el-icon>
-          </button>
-          <div ref="tabsRef" class="nb-tabs" @scroll="updateScrollState">
-            <button
-              v-for="nb in studio.notebooks"
-              :key="nb.id"
-              class="nb-tab"
-              :class="tabClass(nb)"
-              :title="nb.name + (isMine(nb) ? '（我创建的）' : '（共享给我的）')"
-              @click="openNotebookTab(nb.id)"
-              @contextmenu.prevent="openTabContext(nb, $event)"
-            >
-              <span class="nb-tab-dot" />
-              <span class="nb-tab-name">{{ nb.name }}</span>
-              <span v-if="nb.note_count" class="nb-tab-count">{{ nb.note_count }}</span>
-            </button>
-            <!-- 新建工作区：与翻页箭头同族的圆形幽灵钮 -->
-            <button class="nb-add" title="新建工作区" @click="createNewNotebook">
-              <el-icon><Plus /></el-icon>
-            </button>
-            <span v-if="!studio.notebooks.length" class="nb-empty-hint">还没有工作区，点「+」新建</span>
-          </div>
-          <button class="nb-arrow" :disabled="!canScrollRight" @click="scrollTabs(1)" title="向右翻">
-            <el-icon><ArrowRight /></el-icon>
-          </button>
-        </div>
-      </div>
-
-      <div class="topbar-actions">
-        <el-tooltip content="工作区 / 报告" placement="bottom">
-          <el-button v-if="isMobile" :icon="Collection" size="small" link @click="sideDrawer = true" />
-        </el-tooltip>
-        <el-tooltip content="刷新">
-          <el-button :icon="Refresh" size="small" link @click="refresh" />
-        </el-tooltip>
-      </div>
+    <!-- 移动端简条：来源抽屉 / 当前工作区名 / 刷新 / 工作区报告抽屉（桌面端无此条，工作区切换在全局侧栏） -->
+    <div v-if="isMobile" class="m-bar">
+      <el-tooltip content="选择知识库 / 文件" placement="bottom">
+        <el-button :icon="Files" size="small" link @click="sourcesDrawer = true" />
+      </el-tooltip>
+      <span class="m-bar-title">{{ studio.currentNotebook?.name || '工作台' }}</span>
+      <el-tooltip content="刷新">
+        <el-button :icon="Refresh" size="small" link @click="refresh" />
+      </el-tooltip>
+      <el-tooltip content="工作区 / 报告" placement="bottom">
+        <el-button :icon="Collection" size="small" link @click="sideDrawer = true" />
+      </el-tooltip>
     </div>
 
-    <!-- 工作区标签右键菜单 -->
-    <Teleport to="body">
-      <div v-if="ctxMenu.show" class="nb-ctx-mask" @click="closeCtx" @contextmenu.prevent="closeCtx">
-        <div class="nb-ctx" :style="{ top: ctxMenu.y + 'px', left: ctxMenu.x + 'px' }" @click.stop>
-          <div class="nb-ctx-title">{{ ctxMenu.nb?.name }}</div>
-          <button class="nb-ctx-item" @click="ctxRename"><el-icon><Edit /></el-icon>重命名</button>
-          <button class="nb-ctx-item" @click="ctxShare"><el-icon><Share /></el-icon>共享</button>
-          <button class="nb-ctx-item danger" @click="ctxDelete"><el-icon><Delete /></el-icon>删除</button>
-        </div>
-      </div>
-    </Teleport>
-
-    <!-- 主体 3 列（移动端仅保留聊天列，两侧面板进抽屉） -->
+    <!-- 主体：中对话 + 右笔记/报告（桌面端）；来源选择统一走抽屉 -->
     <div class="layout">
-      <div v-if="!isMobile" class="col col-left" :class="{ 'sources-disabled': effectiveAgentMode }">
-        <SourcesPanel />
-      </div>
-
       <div class="col col-center">
         <!-- 未选中工作区：居中欢迎块（今日视图已独立为 /today 门户页） -->
         <div v-if="!studio.currentNotebook" class="empty-tip">
           <div class="empty-welcome">
             <el-icon :size="44" class="empty-welcome-icon"><Notebook /></el-icon>
-            <p class="empty-welcome-text">选择一个工作区开始，或新建一个</p>
+            <p class="empty-welcome-text">在左侧边栏选择一个工作区开始，或新建一个</p>
             <el-button type="primary" :icon="Plus" @click="createNewNotebook">新建工作区</el-button>
           </div>
         </div>
         <div v-else class="chat-area">
           <!-- 消息区 -->
-          <div class="messages" ref="messagesRef">
+          <!-- 消息区：点击拦截在容器层——内链（/customers/5 等）走前端路由，外链新标签打开 -->
+          <div class="messages" ref="messagesRef" @click="onMsgClick">
             <div v-if="!messages.length" class="welcome">
               <h2>🎓 {{ studio.currentNotebook.name }}</h2>
-              <p class="hint">从左侧选择知识库或文件，然后开始提问</p>
+              <p class="hint">点击输入区上方「范围」选择知识库或文件，然后开始提问</p>
               <div class="samples">
                 <el-button v-for="q in sampleQuestions" :key="q" @click="send(q)">{{ q }}</el-button>
               </div>
@@ -119,10 +71,19 @@
                   <span v-if="m.feedback" class="feedback-done">已反馈</span>
                 </template>
               </div>
-              <!-- 引用来源 -->
+              <!-- 引用来源：file_id 非空可点击直达文件预览 -->
               <div v-if="m.role === 'ai' && m.showSources && m.sources?.length" class="sources-panel-inline">
-                <div v-for="s in m.sources" :key="s.chunk_id" class="source-item">
-                  <div class="source-title">{{ s.doc_title }} <span class="score">{{ Math.round((s.score || 0) * 100) }}%</span></div>
+                <div
+                  v-for="s in m.sources"
+                  :key="s.chunk_id"
+                  class="source-item"
+                  :class="{ clickable: !!s.file_id }"
+                  @click="s.file_id && openSourcePreview(s)"
+                >
+                  <div class="source-title">
+                    <span :class="{ 'source-link': !!s.file_id }">{{ s.file_name || s.doc_title }}</span>
+                    <span class="score">{{ Math.round((s.score || 0) * 100) }}%</span>
+                  </div>
                   <div class="source-excerpt">{{ s.excerpt }}</div>
                 </div>
               </div>
@@ -141,6 +102,20 @@
             />
             <div class="input-actions">
               <div class="scope-info">
+                <!-- 附件上传：快速上传到文档库默认目录，并直接关联+选中到本工作区对话范围 -->
+                <el-dropdown trigger="click" @command="onAttachCommand">
+                  <el-button link class="attach-btn" :loading="attaching" title="上传文件/文件夹，关联到本工作区">
+                    <el-icon v-if="!attaching" :size="16"><Paperclip /></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="files">上传文件</el-dropdown-item>
+                      <el-dropdown-item command="folder">上传文件夹</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <input ref="attachInput" type="file" multiple hidden @change="onAttachChange" />
+                <input ref="attachDirInput" type="file" webkitdirectory hidden @change="onAttachChange" />
                 <!-- dsh Agent 模式：由 AI 自主规划检索与工具调用，不接受知识库/文件/深度思考参数。
                      后端 DSH_AGENT_ENABLED 关闭时禁用开关且强制走普通链路 -->
                 <el-switch
@@ -165,12 +140,43 @@
                   <el-tag size="small" type="warning">Agent 自主检索</el-tag>
                 </template>
                 <template v-else>
-                  <el-tag v-if="studio.selectedKbIds.length" size="small" type="primary">
-                    {{ studio.selectedKbIds.length }} 知识库
-                  </el-tag>
-                  <el-tag v-if="studio.selectedFileIds.length" size="small" type="success">
-                    {{ studio.selectedFileIds.length }} 文件
-                  </el-tag>
+                  <!-- 「范围」入口：桌面端在输入区附近就地弹出 popover（无遮罩），移动端走抽屉 -->
+                  <el-popover
+                    v-if="!isMobile"
+                    v-model:visible="sourcesPopover"
+                    placement="top-start"
+                    :width="360"
+                    trigger="click"
+                    :popper-style="{ padding: 0 }"
+                  >
+                    <template #reference>
+                      <span class="scope-tags">
+                        <el-tag size="small" class="scope-tag scope-entry">
+                          <el-icon :size="12" style="margin-right: 2px; vertical-align: -1px"><Files /></el-icon>范围
+                        </el-tag>
+                        <el-tag v-if="studio.selectedKbIds.length" size="small" type="primary" class="scope-tag">
+                          {{ studio.selectedKbIds.length }} 知识库
+                        </el-tag>
+                        <el-tag v-if="studio.selectedFileIds.length" size="small" type="success" class="scope-tag">
+                          {{ studio.selectedFileIds.length }} 文件
+                        </el-tag>
+                      </span>
+                    </template>
+                    <div class="popover-sources">
+                      <SourcesPanel />
+                    </div>
+                  </el-popover>
+                  <template v-else>
+                    <el-tag size="small" class="scope-tag scope-entry" @click="sourcesDrawer = true">
+                      <el-icon :size="12" style="margin-right: 2px; vertical-align: -1px"><Files /></el-icon>范围
+                    </el-tag>
+                    <el-tag v-if="studio.selectedKbIds.length" size="small" type="primary" class="scope-tag" @click="sourcesDrawer = true">
+                      {{ studio.selectedKbIds.length }} 知识库
+                    </el-tag>
+                    <el-tag v-if="studio.selectedFileIds.length" size="small" type="success" class="scope-tag" @click="sourcesDrawer = true">
+                      {{ studio.selectedFileIds.length }} 文件
+                    </el-tag>
+                  </template>
                 </template>
               </div>
               <el-button v-if="loading" type="danger" :icon="VideoPause" @click="studio.stopChat(studio.currentNotebook?.id)">停止</el-button>
@@ -190,7 +196,7 @@
       </div>
     </div>
 
-    <!-- 移动端：来源选择抽屉 -->
+    <!-- 来源选择抽屉（仅移动端；桌面端用输入区旁的 popover；Agent 模式下面板整体禁用遮罩） -->
     <el-drawer v-if="isMobile" v-model="sourcesDrawer" title="选择知识库 / 文件" size="82%">
       <div class="drawer-sources" :class="{ 'sources-disabled': effectiveAgentMode }">
         <SourcesPanel />
@@ -206,29 +212,30 @@
       <ReportsPanel v-if="studio.activeTab === 'reports'" ref="reportsPanelRef" />
     </el-drawer>
 
-    <ShareDialog v-model="shareNotebookDialog" resource-type="notebook" :resource="shareNotebook" @changed="refresh" />
+    <!-- 引用来源直达文件预览 -->
+    <FilePreview v-model="previewVisible" :file="previewFile" />
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import {
-  Notebook, ArrowLeft, ArrowRight, Plus, Refresh, Edit, Delete, Share,
+  Notebook, Plus, Refresh,
   Search, Link, Folder, MagicStick, Collection, Cpu, Files,
-  CircleCheck, CircleClose, VideoPause, Promotion,
+  CircleCheck, CircleClose, VideoPause, Promotion, Paperclip,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useStudioStore } from '../stores/studio'
-import { useAuthStore } from '../stores/auth'
 import { useBrandStore } from '../stores/brand'
 import { renderMarkdown } from '../utils/markdown'
 import { toolNameMap } from '../utils/format'
-import { submitFeedback, updateNotebook, deleteNotebook } from '../api'
-import ShareDialog from '../components/ShareDialog.vue'
+import { submitFeedback } from '../api'
+import { uploadLibraryFiles, uploadSummary } from '../api/libraryUpload'
 import SourcesPanel from '../components/Studio/SourcesPanel.vue'
 import NotesPanel from '../components/Studio/NotesPanel.vue'
 import ReportsPanel from '../components/Studio/ReportsPanel.vue'
+import FilePreview from '../components/FilePreview.vue'
 
 const TOOL_ICONS = { web_search: Search, web_fetch: Link }
 function toolLabel(name) {
@@ -242,9 +249,46 @@ function toolIcon(name) {
 }
 
 const studio = useStudioStore()
-const authStore = useAuthStore()
 const brand = useBrandStore()
 const route = useRoute()
+const router = useRouter()
+
+// 消息区链接点击拦截：站内路径（如 /customers/5）走前端路由不整页刷新；外链新标签打开。
+// 模型有时会把相对 url 脑补成绝对地址（http://host/customers/5），
+// 因此 http(s) 链接的路径命中站内路由前缀时也按内链处理
+const INTERNAL_PREFIXES = ['/customers', '/library', '/kbs', '/notebooks', '/reports']
+
+function onMsgClick(e) {
+  const a = e.target.closest('a')
+  if (!a) return
+  const href = (a.getAttribute('href') || '').trim()
+  if (!href) return
+  if (href.startsWith('/')) {
+    e.preventDefault()
+    router.push(href)
+    return
+  }
+  if (/^https?:\/\//.test(href)) {
+    try {
+      const u = new URL(href)
+      if (u.host === window.location.host || INTERNAL_PREFIXES.some((p) => u.pathname.startsWith(p))) {
+        e.preventDefault()
+        router.push(u.pathname + u.search)
+        return
+      }
+    } catch { /* 非法 URL 按外链处理 */ }
+    e.preventDefault()
+    window.open(href, '_blank', 'noopener')
+  }
+}
+
+// 引用来源直达文件预览
+const previewVisible = ref(false)
+const previewFile = ref(null)
+function openSourcePreview(s) {
+  previewFile.value = { id: s.file_id, file_name: s.file_name, file_type: s.file_type, file_size: s.file_size }
+  previewVisible.value = true
+}
 
 // 对话状态存放在 studio store（按工作区隔离）：切换工作区/页面时流式回答不中断
 const currentChat = computed(() => (studio.currentNotebook ? studio.chatOf(studio.currentNotebook.id) : null))
@@ -273,19 +317,47 @@ watch(
   },
   { immediate: true }
 )
-const shareNotebookDialog = ref(false)
-const shareNotebook = ref(null)
-// 移动端：聊天区全宽，来源/工作区报告进抽屉
+// 移动端：聊天区全宽，工作区/报告进抽屉；来源选择桌面端走输入区旁 popover，移动端走抽屉
 const isMobile = ref(window.innerWidth < 992)
 const sourcesDrawer = ref(false)
+const sourcesPopover = ref(false)
 const sideDrawer = ref(false)
+// 附件快速上传：文档库默认目录（不传 folder_id），上传后直接关联本工作区并纳入对话范围
+const attachInput = ref(null)
+const attachDirInput = ref(null)
+const attaching = ref(false)
+function onAttachCommand(cmd) {
+  if (!studio.currentNotebook) {
+    ElMessage.warning('请先创建/选择一个工作区')
+    return
+  }
+  ;(cmd === 'folder' ? attachDirInput : attachInput).value?.click()
+}
+async function onAttachChange(e) {
+  const files = [...(e.target.files || [])]
+  e.target.value = ''
+  if (!files.length) return
+  attaching.value = true
+  try {
+    // webkitRelativePath 保留文件夹目录结构；单文件退化为文件名
+    const paths = files.map((f) => f.webkitRelativePath || f.name)
+    const res = await uploadLibraryFiles({ files, paths })
+    const newIds = (res?.files || []).map((f) => f.id)
+    if (newIds.length && studio.currentNotebook) {
+      const existed = studio.currentNotebook.source_file_ids || []
+      // 关联到本工作区（updateCurrentNotebook 内部会同步对话范围的选中态）
+      await studio.updateCurrentNotebook({ source_file_ids: [...new Set([...existed, ...newIds])] })
+    }
+    ElMessage.success(uploadSummary(res))
+  } catch { /* 拦截器已提示 */ } finally {
+    attaching.value = false
+  }
+}
 function onResize() {
   isMobile.value = window.innerWidth < 992
   if (!isMobile.value) {
-    sourcesDrawer.value = false
     sideDrawer.value = false
   }
-  updateScrollState()
 }
 // 会话历史改由 store 管理（loadChatHistory 内部有防覆盖保护）
 
@@ -302,97 +374,6 @@ const sampleQuestions = [
   '基于以上内容给出 3 个行动方案',
   '对比分析不同来源的差异',
 ]
-
-// ========== 工作区标签栏（类 OneNote） ==========
-const tabsRef = ref(null)
-const canScrollLeft = ref(false)
-const canScrollRight = ref(false)
-
-function updateScrollState() {
-  const el = tabsRef.value
-  if (!el) return
-  canScrollLeft.value = el.scrollLeft > 2
-  canScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 2
-}
-
-function scrollTabs(dir) {
-  const el = tabsRef.value
-  if (el) el.scrollBy({ left: dir * Math.max(el.clientWidth * 0.7, 160), behavior: 'smooth' })
-}
-
-// 工作区颜色：自己创建 / 他人共享
-const currentUserId = computed(() => authStore.user?.id)
-function isMine(nb) {
-  return nb.created_by === currentUserId.value
-}
-function tabClass(nb) {
-  return {
-    active: studio.currentNotebook?.id === nb.id,
-    mine: isMine(nb),
-    shared: !isMine(nb),
-  }
-}
-
-async function openNotebookTab(id) {
-  if (studio.currentNotebook?.id === id) return
-  await studio.openNotebook(id)
-  await studio.loadChatHistory(id)
-  scrollToBottom()
-}
-
-// 右键上下文菜单
-const ctxMenu = reactive({ show: false, x: 0, y: 0, nb: null })
-function openTabContext(nb, e) {
-  ctxMenu.nb = nb
-  ctxMenu.x = e.clientX
-  ctxMenu.y = e.clientY
-  ctxMenu.show = true
-}
-function closeCtx() {
-  ctxMenu.show = false
-}
-
-async function ctxRename() {
-  const nb = ctxMenu.nb
-  closeCtx()
-  if (!nb) return
-  const { value: name } = await ElMessageBox.prompt('新名称', '重命名', {
-    inputValue: nb.name,
-    inputPattern: /.+/,
-  }).catch(() => ({ value: null }))
-  if (!name) return
-  await updateNotebook(nb.id, { name })
-  await studio.loadNotebooks()
-  if (studio.currentNotebook?.id === nb.id) {
-    studio.currentNotebook = { ...studio.currentNotebook, name }
-  }
-  ElMessage.success('已重命名')
-}
-
-function ctxShare() {
-  const nb = ctxMenu.nb
-  closeCtx()
-  if (!nb) return
-  shareNotebook.value = { id: nb.id, name: nb.name, owner_id: nb.created_by, is_private: nb.is_private, perm: nb.perm }
-  shareNotebookDialog.value = true
-}
-
-async function ctxDelete() {
-  const nb = ctxMenu.nb
-  closeCtx()
-  if (!nb) return
-  await ElMessageBox.confirm(
-    `确定删除工作区「${nb.name}」？将移入回收站，可随时恢复。`,
-    '删除确认', { type: 'warning' }
-  )
-  await deleteNotebook(nb.id)
-  studio.clearChat(nb.id)
-  if (studio.currentNotebook?.id === nb.id) {
-    studio.currentNotebook = null
-  }
-  await studio.loadNotebooks()
-  ElMessage.success('已删除')
-}
 
 async function refresh() {
   await studio.loadNotebooks()
@@ -453,7 +434,13 @@ function renderMsg(m) {
   if (m.role === 'user') {
     return `<div class="user-content">${escapeHtml(m.content)}</div>`
   }
-  return renderMarkdown(m.content || '')
+  let html = renderMarkdown(m.content || '')
+  // 联网来源引用上标：模型按引用规范输出的 [序号](http…) 链接 → 上标样式，
+  // title 携带原始网址（悬停可见），点击由 onMsgClick 拦截新标签打开
+  return html.replace(
+    /<a href="(https?:\/\/[^"]+)">(\d{1,2})<\/a>/g,
+    '<sup class="cite"><a href="$1" title="$1">$2</a></sup>'
+  )
 }
 
 function escapeHtml(s) {
@@ -490,10 +477,18 @@ onMounted(async () => {
   if (studio.currentNotebook) {
     await studio.loadChatHistory(studio.currentNotebook.id)
   }
-  await nextTick()
-  updateScrollState()
   scrollToBottom()
 })
+
+// 侧栏切换当前工作区时（组件已挂载），恢复该工作区的会话历史并滚到底部
+watch(
+  () => studio.currentNotebook?.id,
+  async (id) => {
+    if (!id) return
+    await studio.loadChatHistory(id)
+    scrollToBottom()
+  }
+)
 
 // 流式进行中（新消息/新 token）自动滚到底部
 watch(
@@ -505,169 +500,37 @@ watch(
   },
   () => scrollToBottom()
 )
-
-// 工作区列表变化/尺寸变化后更新翻页箭头状态
-watch(() => studio.notebooks.length, async () => { await nextTick(); updateScrollState() })
 </script>
 
 <style scoped>
 .studio {
   display: flex;
   flex-direction: column;
-  height: calc((100vh - 120px) / var(--app-zoom, 1));
+  /* 桌面端：顶栏已移除，只扣主区上下 padding（20+20） */
+  height: calc((100vh - 40px) / var(--app-zoom, 1));
   background: var(--app-bg);
 }
-.topbar {
+
+/* 移动端简条 */
+.m-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  /* 底部无 padding：tab 下边缘贴住边框，active tab 才能与下方内容区连通 */
-  padding: 10px 16px 0;
+  gap: 6px;
+  padding: 8px 10px;
   background: var(--app-card);
   border-bottom: 1px solid var(--app-border);
 }
-.topbar-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.m-bar-title {
   flex: 1;
   min-width: 0;
-}
-
-/* 工作区标签栏（类 OneNote，左右可翻页） */
-.nb-tabbar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1;
-  min-width: 0;
-  align-self: stretch;
-}
-.nb-tabs {
-  display: flex;
-  align-items: flex-end;  /* tab 贴住 topbar 下边框 */
-  gap: 4px;
-  overflow-x: auto;
-  scrollbar-width: none;
-  flex: 1;
-  min-width: 0;
-  scroll-behavior: smooth;
-}
-.nb-tabs::-webkit-scrollbar {
-  display: none;
-}
-.nb-arrow {
-  flex: none;
-  align-self: center;
-  border: 1px solid var(--app-border);
-  background: var(--app-card);
-  color: var(--app-ink-2);
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-}
-.nb-arrow:hover:not(:disabled) {
-  background: var(--app-fill-1);
-  color: var(--app-ink);
-}
-.nb-arrow:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
-.nb-tab {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 12px;
-  /* inactive：无边框无底色，不突兀；active 时才描边浮出 */
-  border: 1px solid transparent;
-  border-radius: 8px 8px 0 0;
-  background: transparent;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--app-ink-2);
-  position: relative;
-  white-space: nowrap;
-  max-width: 180px;
-  /* 下压 1px 盖住 topbar 边框，配合 active 的底边同色实现连通感 */
-  margin-bottom: -1px;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-.nb-tab:hover {
-  background: var(--app-fill-1);
-}
-.nb-tab.active {
-  background: var(--app-surface);
-  border-color: var(--app-border);
-  border-bottom-color: var(--app-surface);  /* 与下方主区同色 → 视觉连通 */
-  z-index: 1;
-  color: var(--app-ink);
+  font-size: 14px;
   font-weight: 600;
-}
-.nb-tab-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex: none;
-}
-/* 自己创建：主色；共享给我的：琥珀色 */
-.nb-tab.mine .nb-tab-dot { background: var(--el-color-primary); }
-.nb-tab.shared .nb-tab-dot { background: #e6a23c; }
-.nb-tab.mine.active { border-top: 2px solid var(--el-color-primary); }
-.nb-tab.shared.active { border-top: 2px solid #e6a23c; }
-.nb-tab-name {
+  color: var(--app-ink);
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 130px;
-}
-.nb-tab-count {
-  font-size: 11px;
-  color: var(--app-ink-3);
-  background: var(--app-fill-1);
-  border-radius: 8px;
-  padding: 0 5px;
-}
-/* 新建工作区钮：与翻页箭头同族的圆形幽灵钮，hover 主色描边+图标 */
-.nb-add {
-  flex: none;
-  align-self: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  border: 1px solid var(--app-border);
-  background: transparent;
-  color: var(--app-ink-2);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 2px;
-  transition: all 0.15s ease;
-}
-.nb-add:hover {
-  border-color: var(--el-color-primary);
-  color: var(--el-color-primary);
-}
-.nb-empty-hint {
-  align-self: center;
-  font-size: 13px;
-  color: var(--app-ink-3);
-  padding-left: 4px;
-  padding-bottom: 6px;  /* tabs 贴底对齐后，提示文字视觉上抬一点居中 */
+  white-space: nowrap;
 }
 
-/* 右键上下文菜单 */
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
 .layout {
   flex: 1;
   display: flex;
@@ -678,12 +541,6 @@ watch(() => studio.notebooks.length, async () => { await nextTick(); updateScrol
 .col {
   height: 100%;
   overflow: hidden;
-}
-.col-left {
-  width: 260px;
-  flex-shrink: 0;
-  background: var(--studio-side-bg);  /* 侧栏：稍深一档 */
-  border-right: 1px solid var(--app-line);
 }
 /* Agent 模式下源选择不生效：遮罩禁用并提示（dsh 自主规划检索） */
 .sources-disabled {
@@ -712,11 +569,12 @@ watch(() => studio.notebooks.length, async () => { await nextTick(); updateScrol
   flex-direction: column;
   background: var(--app-surface);  /* 主区：白（最高层） */
   box-shadow: inset 0 0 0 1px var(--app-line);  /* 内描边强化分区 */
+  border-radius: var(--app-radius) 0 0 var(--app-radius);
 }
 .col-right {
   width: 360px;
   flex-shrink: 0;
-  background: var(--studio-side-bg);  /* 与左列对称 */
+  background: var(--studio-side-bg);
   border-left: 1px solid var(--app-line);
 }
 .col-tabs {
@@ -852,6 +710,40 @@ watch(() => studio.notebooks.length, async () => { await nextTick(); updateScrol
   color: var(--app-ink-2);
   line-height: 1.5;
 }
+/* 引用来源可点击（file_id 非空时直达文件预览） */
+.source-item.clickable {
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin: 0 -8px;
+  transition: background 0.15s ease;
+}
+.source-item.clickable:hover {
+  background: var(--app-surface);
+}
+.source-link {
+  color: var(--el-color-primary);
+}
+.source-item.clickable:hover .source-link {
+  text-decoration: underline;
+}
+/* 联网来源上标引用：[n](url) 渲染为上标，悬停经 title 显示原始网址 */
+:deep(sup.cite) {
+  margin: 0 1px;
+}
+:deep(sup.cite a) {
+  color: var(--el-color-primary);
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0 1px;
+}
+:deep(sup.cite a:hover) {
+  text-decoration: underline;
+}
+/* 消息正文中的站内链接（客户主页等） */
+:deep(.msg-content a) {
+  color: var(--el-color-primary);
+}
 .tool-tags {
   display: flex;
   flex-wrap: wrap;
@@ -924,42 +816,45 @@ watch(() => studio.notebooks.length, async () => { await nextTick(); updateScrol
 .scope-info {
   display: flex;
   gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+/* 附件上传按钮：与截图一致的回形针入口 */
+.attach-btn {
+  padding: 4px;
+  color: var(--app-ink-2);
+}
+.attach-btn:hover {
+  color: var(--el-color-primary);
+}
+/* 范围 tag 组：桌面端作为 popover 的锚点整体包裹 */
+.scope-tags {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 范围 tag：可点击，打开来源选择（桌面 popover / 移动端抽屉） */
+.scope-tag {
+  cursor: pointer;
+}
+.scope-entry {
+  background: var(--app-surface);
+}
+/* 来源 popover 内容：固定高度内滚动（SourcesPanel 自身 height:100% + overflow） */
+.popover-sources {
+  height: min(420px, 55vh);
+  overflow: hidden;
 }
 
-/* ========== 移动端（<992px）：聊天区全宽，侧栏进抽屉 ========== */
+/* ========== 移动端（<992px）：聊天区全宽，工作区/报告进抽屉 ========== */
 @media (max-width: 991px) {
   .studio {
-    /* 桌面 120px ≈ 顶栏+内边距；移动再加底部标签栏(~66px)+内边距 */
+    /* 顶栏(52px)+简条+底部标签栏(~66px)+内边距 */
     height: calc((100vh - 150px - env(safe-area-inset-bottom)) / var(--app-zoom, 1));
-  }
-  .topbar {
-    padding: 8px 10px 0;
-    gap: 8px;
-  }
-  .topbar-left {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-    min-width: 0;
-    flex: 1;
-  }
-  .nb-tab {
-    max-width: 130px;
-    font-size: 12px;
-    padding: 5px 9px;
-  }
-  .nb-tab-name {
-    max-width: 90px;
-  }
-  .topbar-actions {
-    flex: none;
-    gap: 4px;
-  }
-  .topbar-actions .el-button + .el-button {
-    margin-left: 4px;
   }
   .col-center {
     min-width: 0;
+    border-radius: var(--app-radius);
   }
   .messages {
     padding: 14px;
@@ -970,57 +865,5 @@ watch(() => studio.notebooks.length, async () => { await nextTick(); updateScrol
   .input-area {
     padding: 10px 12px;
   }
-}
-</style>
-
-<!-- 右键菜单用 Teleport 挂到 body，作用域样式到不了，这里用全局样式 -->
-<style>
-.nb-ctx-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 3000;
-  background: transparent;
-}
-.nb-ctx {
-  position: fixed;
-  min-width: 140px;
-  background: var(--app-card);
-  border: 1px solid var(--app-border);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  padding: 6px;
-  z-index: 3001;
-}
-.nb-ctx-title {
-  padding: 6px 10px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-ink-3);
-  border-bottom: 1px solid var(--app-border);
-  margin-bottom: 4px;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.nb-ctx-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  border: none;
-  background: transparent;
-  padding: 8px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--app-ink);
-  text-align: left;
-}
-.nb-ctx-item:hover {
-  background: var(--app-fill-1);
-}
-.nb-ctx-item.danger {
-  color: var(--el-color-danger);
 }
 </style>

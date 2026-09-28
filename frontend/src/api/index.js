@@ -56,6 +56,14 @@ export const uploadAvatar = (file) => {
 // 系统设置：解析文件格式开关
 export const getParseFormats = () => request.get('/api/v1/admin/settings/formats')
 export const updateParseFormats = (data) => request.put('/api/v1/admin/settings/formats', data)
+export const getLoginIntegrations = () => request.get('/api/v1/admin/settings/login-integrations')
+export const updateLoginIntegrations = (data) => request.put('/api/v1/admin/settings/login-integrations', data)
+// 邮件写作规范（注入 AI 邮件草稿生成）
+export const getEmailGuide = () => request.get('/api/v1/admin/settings/email-guide')
+export const updateEmailGuide = (guide) => request.put('/api/v1/admin/settings/email-guide', { guide })
+// 文档资料类型（全员可读列表 / 管理端整体替换）
+export const getDocCategories = () => request.get('/api/v1/library/categories')
+export const updateDocCategories = (items) => request.put('/api/v1/admin/settings/doc-categories', { items })
 // 上传端：当前启用解析的格式清单（登录用户即可读，供选择过滤）
 export const getUploadFormats = () => request.get('/api/v1/library/upload-formats')
 
@@ -70,6 +78,8 @@ export const batchShareFiles = (fileIds, data) => request.post('/api/v1/permissi
 
 // ========== 认证 ==========
 export const login = (data) => request.post('/api/v1/auth/login', data)
+export const sendSmsCode = (phone) => request.post('/api/v1/auth/sms-code', { phone })
+export const phoneLogin = (data) => request.post('/api/v1/auth/login/phone', data)
 export const getMe = () => request.get('/api/v1/auth/me')
 export const getPreferences = () => request.get('/api/v1/auth/preferences')
 export const updatePreferences = (data) => request.put('/api/v1/auth/preferences', data)
@@ -97,6 +107,10 @@ export const importCustomers = (file, mode) => {
 export const exportCustomers = (params) =>
   request.get('/api/v1/customers/export', { params, responseType: 'blob' })
 export const getCustomerDuplicates = (params) => request.get('/api/v1/customers/duplicates', { params })
+// AI 客户简报：后台生成（202），前端轮询详情刷新
+export const refreshCustomerBrief = (id) => request.post(`/api/v1/customers/${id}/brief/refresh`)
+// AI 邮件草稿：body {intent, language} → {subject, body}
+export const emailDraft = (id, data) => request.post(`/api/v1/customers/${id}/email-draft`, data)
 
 // ========== 跟进 ==========
 export const getFollowups = (customerId) => request.get(`/api/v1/customers/${customerId}/followups`)
@@ -249,6 +263,8 @@ export const runMaintenance = (action) => request.post('/api/v1/admin/system/mai
 export const createBackup = () => request.post('/api/v1/admin/system/backups')
 export const getBackups = () => request.get('/api/v1/admin/system/backups')
 export const restoreBackup = (name) => request.post(`/api/v1/admin/system/backups/${name}/restore`)
+// 沙箱数据重置（危险操作，仅 dev/sandbox 环境可用）
+export const resetSandbox = () => request.post('/api/v1/admin/system/reset-sandbox')
 export const getAdminErrors = (params) => request.get('/api/v1/admin/errors', { params })
 export const resolveAdminError = (id) => request.post(`/api/v1/admin/errors/${id}/resolve`)
 export const resolveAllAdminErrors = () => request.post('/api/v1/admin/errors/resolve_all')

@@ -69,13 +69,15 @@ def test_stagnant_opportunity_matched():
 
 
 def test_stagnant_closed_stage_excluded():
+    """终结阶段（closed_won/closed_lost，与实际商机阶段枚举一致）不触发停滞提醒。"""
     rows = [
-        {"opportunity_id": 1, "stage": "closed", "updated_at": _ago(days=100)},
-        {"opportunity_id": 2, "stage": "won", "updated_at": _ago(days=100)},
+        {"opportunity_id": 1, "stage": "closed_won", "updated_at": _ago(days=100)},
+        {"opportunity_id": 2, "stage": "closed_lost", "updated_at": _ago(days=100)},
         {"opportunity_id": 3, "stage": "prospecting", "updated_at": _ago(days=100)},
+        {"opportunity_id": 4, "stage": "negotiation", "updated_at": _ago(days=100)},
     ]
     matched = match_stagnant_opportunities(rows, 10, NOW)
-    assert [m["opportunity_id"] for m in matched] == [3]
+    assert [m["opportunity_id"] for m in matched] == [3, 4]
 
 
 def test_stagnant_recently_updated_not_matched():

@@ -12,8 +12,8 @@ from app.services.llm import resolve_chat_llm
 logger = logging.getLogger(__name__)
 
 TODO_EXTRACT_PROMPT = (
-    "请从以下客户跟进记录中提取需要后续执行的待办事项。"
-    '只输出 JSON 数组，格式为 [{"title": "待办标题", "due_date": "YYYY-MM-DD", "priority": "high|medium|low"}]，'
+    "请从以下客户跟进记录中提取需要后续执行的待办事项（今天是 {today}，相对日期请换算成具体日期）。"
+    '只输出 JSON 数组，格式为 [{{"title": "待办标题", "due_date": "YYYY-MM-DD", "priority": "high|medium|low"}}]，'
     "due_date 和 priority 可省略；如果没有待办事项，输出 []。不要输出任何其他文字。\n\n"
     "跟进记录：\n{content}"
 )
@@ -75,7 +75,10 @@ async def extract_and_create_tasks(record_id: int) -> None:
         try:
             chat_llm = await resolve_chat_llm(caller="ai_tasks", tenant_id=customer.tenant_id)
             raw = await chat_llm.chat(
-                [{"role": "user", "content": TODO_EXTRACT_PROMPT.format(content=record.content)}]
+                [{"role": "user", "content": TODO_EXTRACT_PROMPT.format(
+                    content=record.content,
+                    today=datetime.now(timezone.utc).date().isoformat(),
+                )}]
             )
         except Exception as exc:
             logger.warning("跟进记录 %s 待办提取失败（忽略）: %s", record_id, exc)

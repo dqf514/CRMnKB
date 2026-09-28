@@ -16,4 +16,6 @@ class FollowUpRecord(Base):
     type: Mapped[str]
     content: Mapped[str] = mapped_column(Text)
     ai_summary: Mapped[str | None] = mapped_column(Text)
+    # 下一步行动（销售记录的后续计划，自由文本）
+    next_step: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

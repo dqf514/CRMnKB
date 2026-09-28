@@ -38,3 +38,13 @@ def test_parse_drops_invalid_priority_and_date():
     todos = parse_todos(raw)
     assert todos[0].get("priority") is None
     assert todos[0].get("due_date") is None
+
+
+def test_prompt_template_format_regression():
+    """回归：模板中的 JSON 示例花括号必须转义，否则 .format(content=...) 抛 KeyError。"""
+    from app.services.ai_tasks import TODO_EXTRACT_PROMPT
+
+    text = TODO_EXTRACT_PROMPT.format(content="客户要求周三前发报价单", today="2026-09-28")
+    assert '{"title"' in text  # 示例 JSON 原样保留
+    assert "客户要求周三前发报价单" in text
+    assert "2026-09-28" in text  # 今天日期注入，供相对日期换算

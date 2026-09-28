@@ -15,6 +15,7 @@ from app.api.deps import get_db, require_admin
 from app.config import settings
 from app.models.brand_settings import BrandSettings
 from app.models.user import User
+from app.services.login_channels import sms_login_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,10 @@ async def _brand_dict(db: AsyncSession) -> dict:
         "logo_url": _logo_url(row),
         # dsh agent 功能开关随公开引导配置下发，前端据此决定聊天默认模式
         "dsh_agent_enabled": settings.DSH_AGENT_ENABLED,
+        # 短信登录开关下发给登录页（是否显示手机号验证码 tab）
+        "sms_login_enabled": await sms_login_enabled(db),
+        # 当前运行环境（dev/sandbox/prod），前端据此显示环境标识
+        "env": settings.ENV,
     }
 
 

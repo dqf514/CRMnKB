@@ -13,8 +13,9 @@ from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
-# 已终结的商机阶段（不再产生"停滞"提醒）
-CLOSED_STAGES = {"closed", "lost", "won"}
+# 已终结的商机阶段（不再产生"停滞"提醒）。
+# 与商机阶段枚举对齐：prospecting/qualification/proposal/negotiation/closed_won/closed_lost
+CLOSED_STAGES = {"closed_won", "closed_lost"}
 
 DEFAULT_TEMPLATES = {
     "days_since_last_followup": "客户 {{customer_name}} 已 {{days}} 天未跟进，请尽快联系",

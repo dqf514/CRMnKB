@@ -19,7 +19,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # 运行环境：dev / prod（非 dev 时启动校验 JWT 密钥强度）
+    # 运行环境：dev / sandbox / prod（非 dev/test 时启动校验 JWT 密钥强度；
+    # sandbox 不在弱 JWT 白名单内，与 prod 一样强制强密钥）
     ENV: str = "dev"
 
     # 数据库

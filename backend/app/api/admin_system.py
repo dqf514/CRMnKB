@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_db, require_admin
 from app.config import settings
 from app.models.user import User
+from app.services.audit import record_audit
 from app.services.backup import list_backups, restore_backup, run_backup
 from app.services.maintenance import cleanup_orphan_uploads, reindex_vector_index, run_vacuum
 
@@ -132,3 +133,69 @@ async def do_restore(
         raise HTTPException(status_code=404, detail="备份不存在")
     background_tasks.add_task(restore_backup, name)
     return {"ok": True, "started": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# 沙箱重置（仅 dev/sandbox/test 环境）
+# ---------------------------------------------------------------------------
+
+# 重置时清空的业务表（表名已核对 models/ 下真实 __tablename__）。
+# 保留：users / tenants / llm_models / system_settings / brand_settings /
+#       industries / skills / mcp_servers（以及 audit_logs，保留操作审计轨迹）。
+_SANDBOX_RESET_TABLES = [
+    "customers",
+    "follow_up_records",
+    "opportunities",
+    "tasks",
+    "notifications",
+    "reports",
+    "knowledge_documents",
+    "document_chunks",
+    "chunk_questions",
+    "knowledge_bases",
+    "library_files",
+    "library_folders",
+    "chat_sessions",
+    "chat_messages",
+    "notebooks",
+    "notebook_notes",
+    "login_codes",
+    "login_attempts",
+    "workflow_runs",
+    "rag_query_logs",
+    "llm_call_logs",
+    "error_logs",
+    "ai_feedback",
+    "agent_approvals",
+]
+
+# 允许重置的环境（sandbox 与 dev/test 同等待遇；prod 一律拒绝）
+_SANDBOX_RESET_ENVS = ("dev", "sandbox", "test")
+
+
+@router.post("/system/reset-sandbox")
+async def reset_sandbox(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """沙箱/开发环境一键清空业务数据：先自动备份（失败则中止），再 TRUNCATE 业务表。
+
+    仅 ENV ∈ dev/sandbox/test 可用，prod 返回 403。
+    """
+    if settings.ENV.lower() not in _SANDBOX_RESET_ENVS:
+        raise HTTPException(status_code=403, detail="仅沙箱/开发环境可重置")
+    # 先备份：备份失败不执行清空，避免无可挽回的数据丢失
+    try:
+        backup_name = await run_backup()
+    except Exception as exc:
+        logger.error("沙箱重置前自动备份失败，已中止: %s", exc)
+        raise HTTPException(status_code=500, detail=f"自动备份失败，已中止重置: {exc}")
+    await db.execute(
+        text(f"TRUNCATE {', '.join(_SANDBOX_RESET_TABLES)} RESTART IDENTITY CASCADE")
+    )
+    record_audit(
+        db, admin, "reset", "system", None,
+        {"action": "reset_sandbox", "backup": backup_name},
+    )
+    await db.commit()
+    return {"ok": True, "backup": backup_name}

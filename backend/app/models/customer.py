@@ -1,6 +1,6 @@
 from datetime import date, datetime
 
-from sqlalchemy import ForeignKey, Text, func
+from sqlalchemy import ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -34,6 +34,11 @@ class Customer(Base):
     # idle / generating / ready / failed
     profile_status: Mapped[str] = mapped_column(default="idle")
     profile_updated_at: Mapped[datetime | None]
+    # DDQ（尽职调查）状态：none / pending / completed
+    ddq_status: Mapped[str] = mapped_column(String(20), default="none")
+    # AI 阶段简报（Markdown）与生成时间
+    ai_brief: Mapped[str | None] = mapped_column(Text)
+    ai_brief_at: Mapped[datetime | None]
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     # 软删除时间（回收站）；NULL = 正常
     deleted_at: Mapped[datetime | None]

@@ -35,7 +35,12 @@
         <el-card class="login-card" shadow="never">
           <h2 class="title">欢迎回来</h2>
           <p class="subtitle">登录以继续使用工作台</p>
-          <el-form :model="form" :rules="rules" ref="formRef" size="large" @keyup.enter="handleLogin">
+          <el-tabs v-if="brandStore.smsLoginEnabled" v-model="loginTab" class="login-tabs">
+            <el-tab-pane label="账号登录" name="account" />
+            <el-tab-pane label="手机验证码登录" name="phone" />
+          </el-tabs>
+          <!-- 账号密码登录 -->
+          <el-form v-show="loginTab === 'account'" :model="form" :rules="rules" ref="formRef" size="large" @keyup.enter="handleLogin">
             <el-form-item prop="username">
               <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" />
             </el-form-item>
@@ -54,6 +59,25 @@
               </el-button>
             </el-form-item>
           </el-form>
+          <!-- 手机号验证码登录（管理端「系统设置 → 登录与接入」开启后显示） -->
+          <el-form v-if="brandStore.smsLoginEnabled" v-show="loginTab === 'phone'" :model="phoneForm" :rules="phoneRules" ref="phoneFormRef" size="large" @keyup.enter="handlePhoneLogin">
+            <el-form-item prop="phone">
+              <el-input v-model="phoneForm.phone" placeholder="手机号" maxlength="11" :prefix-icon="Iphone" />
+            </el-form-item>
+            <el-form-item prop="code">
+              <div class="code-row">
+                <el-input v-model="phoneForm.code" placeholder="6 位验证码" maxlength="6" :prefix-icon="Key" />
+                <el-button class="code-btn" :disabled="codeCountdown > 0" :loading="codeSending" @click="handleSendCode">
+                  {{ codeCountdown > 0 ? `${codeCountdown}s 后重发` : '获取验证码' }}
+                </el-button>
+              </div>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" style="width: 100%" :loading="loading" @click="handlePhoneLogin">
+                登 录
+              </el-button>
+            </el-form-item>
+          </el-form>
         </el-card>
       </div>
     </div>
@@ -61,13 +85,14 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue'
+import { ref, reactive, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { User, Lock, Sunny, Moon, ChatDotRound, AlarmClock, Document } from '@element-plus/icons-vue'
+import { User, Lock, Sunny, Moon, ChatDotRound, AlarmClock, Document, Iphone, Key } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
 import { useBrandStore } from '../stores/brand'
 import { useThemeStore } from '../stores/theme'
+import { sendSmsCode } from '../api'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -101,6 +126,70 @@ async function handleLogin() {
     loading.value = false
   }
 }
+
+// ========== 手机号验证码登录（开关由 /brand 下发的 sms_login_enabled 控制） ==========
+const loginTab = ref('account')
+const phoneFormRef = ref()
+const phoneForm = reactive({ phone: '', code: '' })
+const phoneRules = {
+  phone: [
+    { required: true, message: '请输入手机号', trigger: 'blur' },
+    { pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' },
+  ],
+  code: [
+    { required: true, message: '请输入验证码', trigger: 'blur' },
+    { pattern: /^\d{6}$/, message: '验证码为 6 位数字', trigger: 'blur' },
+  ],
+}
+const codeSending = ref(false)
+const codeCountdown = ref(0)
+let countdownTimer = null
+
+async function handleSendCode() {
+  await phoneFormRef.value.validateField('phone')
+  codeSending.value = true
+  try {
+    const res = await sendSmsCode(phoneForm.phone)
+    // dev 环境 + log 通道：验证码直接带回，自动填充免去查日志
+    if (res?.dev_code) {
+      phoneForm.code = res.dev_code
+      ElMessage.success('开发模式：验证码已自动填充')
+    } else {
+      ElMessage.success('验证码已发送，10 分钟内有效')
+    }
+    codeCountdown.value = 60
+    countdownTimer = setInterval(() => {
+      codeCountdown.value -= 1
+      if (codeCountdown.value <= 0) {
+        clearInterval(countdownTimer)
+        countdownTimer = null
+      }
+    }, 1000)
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    codeSending.value = false
+  }
+}
+
+async function handlePhoneLogin() {
+  await phoneFormRef.value.validate()
+  loading.value = true
+  try {
+    await authStore.loginByPhone(phoneForm)
+    themeStore.syncFromServer()
+    ElMessage.success('登录成功')
+    router.push('/studio')
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    loading.value = false
+  }
+}
+
+onUnmounted(() => {
+  if (countdownTimer) clearInterval(countdownTimer)
+})
 
 brandStore.load()  // 登录页展示自定义品牌（名称/logo）
 </script>
@@ -231,6 +320,25 @@ brandStore.load()  // 登录页展示自定义品牌（名称/logo）
 .subtitle {
   color: var(--app-ink-2);
   margin: 0 0 28px;
+}
+/* 登录方式 tab + 验证码行 */
+.login-tabs {
+  margin-bottom: 8px;
+}
+.login-tabs :deep(.el-tabs__header) {
+  margin-bottom: 18px;
+}
+.code-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.code-row .el-input {
+  flex: 1;
+}
+.code-btn {
+  flex: none;
+  width: 112px;
 }
 
 @media (max-width: 860px) {

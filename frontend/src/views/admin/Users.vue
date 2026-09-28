@@ -21,6 +21,7 @@
         <el-table-column prop="username" label="用户名" min-width="110" />
         <el-table-column prop="name" label="姓名" min-width="100" show-overflow-tooltip />
         <el-table-column prop="email" label="邮箱" min-width="150" show-overflow-tooltip />
+        <el-table-column prop="phone" label="手机号" min-width="120" show-overflow-tooltip />
         <el-table-column label="角色" width="100">
           <template #default="{ row }">
             <el-tag size="small" :type="enumTagType(userRoleMap, row.role)">
@@ -78,6 +79,9 @@
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="form.email" placeholder="电子邮箱" />
+        </el-form-item>
+        <el-form-item label="手机号" prop="phone">
+          <el-input v-model="form.phone" placeholder="手机号（可用于手机/微信登录）" maxlength="11" />
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width: 100%" :disabled="isSelfRow">
@@ -171,7 +175,7 @@ async function loadGroups() {
 const formDrawer = ref(false)
 const saving = ref(false)
 const formRef = ref()
-const emptyForm = { id: null, username: '', password: '', name: '', email: '', role: 'user', group_id: null }
+const emptyForm = { id: null, username: '', password: '', name: '', email: '', phone: '', role: 'user', group_id: null }
 const form = reactive({ ...emptyForm })
 const isSelfRow = computed(() => form.id != null && form.id === authStore.user?.id)
 const formRules = {
@@ -182,6 +186,7 @@ const formRules = {
   ],
   name: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
   email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }],
+  phone: [{ pattern: /^1[3-9]\d{9}$/, message: '手机号格式不正确', trigger: 'blur' }],
 }
 
 function openForm(row) {
@@ -190,6 +195,7 @@ function openForm(row) {
     username: row.username,
     name: row.name,
     email: row.email || '',
+    phone: row.phone || '',
     role: row.role,
     group_id: row.group_id ?? null,
   } : {})
@@ -203,13 +209,15 @@ async function handleSave() {
   try {
     if (form.id) {
       await updateAdminUser(form.id, {
-        name: form.name, email: form.email || null, role: form.role, group_id: form.group_id,
+        name: form.name, email: form.email || null, phone: form.phone || null,
+        role: form.role, group_id: form.group_id,
       })
       ElMessage.success('更新成功')
     } else {
       await createAdminUser({
         username: form.username, password: form.password,
-        name: form.name, email: form.email || null, role: form.role, group_id: form.group_id,
+        name: form.name, email: form.email || null, phone: form.phone || null,
+        role: form.role, group_id: form.group_id,
       })
       ElMessage.success('创建成功')
     }

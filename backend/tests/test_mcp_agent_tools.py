@@ -15,6 +15,7 @@ from app.services.mcp_server import (
     McpToolError,
     crm_add_followup_impl,
     crm_get_customer_impl,
+    crm_list_customers_impl,
     crm_search_customers_impl,
     kb_list_impl,
     mail_draft_create_impl,
@@ -63,6 +64,11 @@ class _FakeSession:
     async def execute(self, stmt, *args, **kwargs):
         self.statements.append(stmt)
         return _FakeResult(self._results.pop(0) if self._results else [])
+
+    async def scalar(self, stmt, *args, **kwargs):
+        self.statements.append(stmt)
+        rows = self._results.pop(0) if self._results else []
+        return rows[0] if rows else None
 
     async def get(self, model, ident):
         return self._get_map.get((model, ident))
@@ -137,6 +143,31 @@ async def test_crm_search_customers_blank_query_returns_empty():
     db = _FakeSession()
     assert await crm_search_customers_impl(db, _user(), "   ") == []
     assert db.statements == []  # 空查询不打数据库
+
+
+# ---------------------------------------------------------------------------
+# crm_list_customers
+# ---------------------------------------------------------------------------
+
+
+async def test_crm_list_customers_returns_total_and_items():
+    db = _FakeSession(results=[[2], [_customer(5), _customer(6, name="乙公司")]])
+    result = await crm_list_customers_impl(db, _user(), limit=20)
+    assert result["total"] == 2
+    assert result["offset"] == 0
+    assert [i["name"] for i in result["items"]] == ["甲公司", "乙公司"]
+    # count 与名单两条语句都要带租户隔离与软删过滤
+    assert len(db.statements) == 2
+    for stmt in db.statements:
+        s = str(stmt.whereclause)
+        assert "tenant_id" in s
+        assert "deleted_at" in s
+
+
+async def test_crm_list_customers_empty_and_clamped():
+    db = _FakeSession(results=[[0], []])
+    result = await crm_list_customers_impl(db, _user(), limit=999, offset=-5)
+    assert result == {"total": 0, "offset": 0, "items": []}
 
 
 # ---------------------------------------------------------------------------

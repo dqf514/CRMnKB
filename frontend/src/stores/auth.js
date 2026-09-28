@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { login as apiLogin, getMe } from '../api'
+import { login as apiLogin, phoneLogin as apiPhoneLogin, getMe } from '../api'
 
 export const useAuthStore = defineStore('auth', {
   state: () => ({
@@ -7,22 +7,28 @@ export const useAuthStore = defineStore('auth', {
     user: JSON.parse(localStorage.getItem('user') || 'null'),
   }),
   actions: {
-    async login(form) {
-      const res = await apiLogin(form)
+    _applyAuth(res) {
       this.token = res.access_token
       this.user = res.user || null
       localStorage.setItem('token', res.access_token)
       if (res.user) localStorage.setItem('user', JSON.stringify(res.user))
       // 登录响应未带 user 时兜底拉取
       if (!res.user) {
-        try {
-          const me = await getMe()
+        return getMe().then((me) => {
           this.user = me
           localStorage.setItem('user', JSON.stringify(me))
-        } catch {
-          /* 忽略 */
-        }
+        }).catch(() => { /* 忽略 */ })
       }
+      return Promise.resolve()
+    },
+    async login(form) {
+      const res = await apiLogin(form)
+      await this._applyAuth(res)
+    },
+    // 手机号 + 验证码登录（后端 /auth/login/phone）
+    async loginByPhone(form) {
+      const res = await apiPhoneLogin(form)
+      await this._applyAuth(res)
     },
     async fetchMe() {
       const me = await getMe()

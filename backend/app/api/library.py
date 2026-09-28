@@ -37,6 +37,7 @@ from app.schemas.library import (
     FolderNode,
     FolderUpdate,
     LibraryChangesOut,
+    LibraryFileCategoryUpdate,
     LibraryFileListOut,
     LibraryFileOut,
     LibraryFileUpdate,
@@ -46,6 +47,7 @@ from app.schemas.library import (
 from app.schemas.kb import AssociateResult
 from app.services.ingestion import enabled_parse_exts, is_supported, process_document
 from app.services.audit import record_audit
+from app.services.doc_categories import category_values, get_doc_categories
 from app.services.kb import (
     associate_files,
     build_tree,
@@ -58,6 +60,45 @@ from app.services.library_sync import list_changes, mark_updated_and_reparse, ut
 from app.services.permissions import accessible_ids, ensure_access, get_access, resolve_permissions
 
 router = APIRouter(prefix="/library", tags=["library"])
+
+
+# ---------------------------------------------------------------------------
+# 客户文档资料类型（category）：存 KnowledgeDocument.metadata["category"]，不改表
+# ---------------------------------------------------------------------------
+
+async def _file_categories(db: AsyncSession, file_ids: list[int]) -> dict[int, str]:
+    """批量读取文件的资料类型：取该文件任一关联知识库文档 metadata.category（先到先得）。"""
+    if not file_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(KnowledgeDocument.file_id, KnowledgeDocument.doc_metadata).where(
+                KnowledgeDocument.file_id.in_(file_ids)
+            )
+        )
+    ).all()
+    categories: dict[int, str] = {}
+    for file_id, metadata in rows:
+        if file_id in categories:
+            continue
+        category = (metadata or {}).get("category")
+        if category:
+            categories[file_id] = category
+    return categories
+
+
+async def _set_file_category(
+    db: AsyncSession, file_ids: list[int], category: str, kb_ids: list[int] | None = None
+) -> None:
+    """把资料类型写入文件关联的知识库文档 metadata（JSONB 整体重赋值以触发变更检测）。"""
+    if not file_ids:
+        return
+    stmt = select(KnowledgeDocument).where(KnowledgeDocument.file_id.in_(file_ids))
+    if kb_ids:
+        stmt = stmt.where(KnowledgeDocument.kb_id.in_(kb_ids))
+    docs = (await db.execute(stmt)).scalars().all()
+    for doc in docs:
+        doc.doc_metadata = {**(doc.doc_metadata or {}), "category": category}
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +288,17 @@ async def upload_files(
     folder_id: int | None = Form(None),
     customer_id: int | None = Form(None),
     kb_ids: list[str] = Form([]),
+    category: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if category is not None:
+        # 资料类型取值动态读取配置（管理端可增删改，见 services/doc_categories.py）
+        valid = await category_values(db)
+        if category not in valid:
+            raise HTTPException(
+                status_code=400, detail=f"category 仅支持 {'/'.join(sorted(valid))}"
+            )
     if folder_id is not None:
         await _get_folder_or_404(db, user, folder_id)
     customer = None
@@ -377,6 +426,10 @@ async def upload_files(
         result = await associate_files(db, user.tenant_id, kb_id, file_ids)
         parse_doc_ids.extend(result["parse_doc_ids"])
 
+    # 客户文档资料类型：写入本次关联产生的知识库文档 metadata
+    if category is not None:
+        await _set_file_category(db, file_ids, category, target_kb_ids)
+
     record_audit(
         db, user, "upload", "file", None,
         {"uploaded": len(uploaded), "names": [f.file_name for f in uploaded][:20]},
@@ -456,6 +509,7 @@ async def list_files(
     )
     rows = (await db.execute(stmt)).all()
     perm_map = await resolve_permissions(db, user, "file", [f.id for f, _ in rows])
+    categories = await _file_categories(db, [f.id for f, _ in rows])
     items = [
         LibraryFileOut(
             id=f.id,
@@ -472,6 +526,7 @@ async def list_files(
             perm=perm_map.get(f.id),
             content_hash=f.content_hash,
             updated_at=f.updated_at,
+            category=categories.get(f.id),
         )
         for f, kb_count in rows
     ]
@@ -528,6 +583,7 @@ async def get_file(
     file = await _get_file_or_404(db, user, file_id, "read")
     kb_count = await _kb_assoc_count(db, file.id)
     perm = await get_access(db, user.tenant_id, user.id, "file", file.id)
+    category = (await _file_categories(db, [file.id])).get(file.id)
     return LibraryFileOut(
         id=file.id,
         folder_id=file.folder_id,
@@ -543,6 +599,7 @@ async def get_file(
         perm=perm,
         content_hash=file.content_hash,
         updated_at=file.updated_at,
+        category=category,
     )
 
 
@@ -581,6 +638,7 @@ async def update_file(
     await db.refresh(file)
     kb_count = await _kb_assoc_count(db, file.id)
     perm = await get_access(db, user.tenant_id, user.id, "file", file.id)
+    category = (await _file_categories(db, [file.id])).get(file.id)
     return LibraryFileOut(
         id=file.id,
         folder_id=file.folder_id,
@@ -596,7 +654,34 @@ async def update_file(
         perm=perm,
         content_hash=file.content_hash,
         updated_at=file.updated_at,
+        category=category,
     )
+
+
+@router.get("/categories")
+async def list_doc_categories(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """资料类型列表（登录用户可读，上传/展示用）；维护入口在管理端系统设置。"""
+    return {"items": await get_doc_categories(db)}
+
+
+@router.put("/files/{file_id}/category")
+async def update_file_category(
+    file_id: int,
+    body: LibraryFileCategoryUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """修改文件（客户文档）的资料类型：写入其关联知识库文档的 metadata.category。"""
+    file = await _get_file_or_404(db, user, file_id, "edit")
+    valid = await category_values(db)
+    if body.category not in valid:
+        raise HTTPException(status_code=400, detail=f"category 仅支持 {'/'.join(sorted(valid))}")
+    await _set_file_category(db, [file.id], body.category)
+    await db.commit()
+    return {"ok": True, "id": file.id, "category": body.category}
 
 
 @router.delete("/files/{file_id}", status_code=204)

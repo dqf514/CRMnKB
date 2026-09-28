@@ -43,6 +43,7 @@ def _admin_user_out(u: User, group_name: str | None = None) -> AdminUserOut:
         username=u.username,
         name=u.name,
         email=u.email,
+        phone=u.phone,
         role=u.role,
         group_id=u.group_id,
         group_name=group_name,
@@ -50,6 +51,19 @@ def _admin_user_out(u: User, group_name: str | None = None) -> AdminUserOut:
         last_login_at=u.last_login_at,
         created_at=u.created_at,
     )
+
+
+async def _check_phone_unique(
+    db: AsyncSession, tenant_id: int, phone: str | None, exclude_user_id: int | None = None
+) -> None:
+    """手机号租户内唯一（为后续手机号登录做准备；DB 层有部分唯一索引兜底）。"""
+    if not phone:
+        return
+    stmt = select(User.id).where(User.tenant_id == tenant_id, User.phone == phone)
+    if exclude_user_id is not None:
+        stmt = stmt.where(User.id != exclude_user_id)
+    if await db.scalar(stmt) is not None:
+        raise HTTPException(status_code=409, detail="该手机号已被其他账号使用")
 
 
 @router.get("/users", response_model=AdminUserListOut)
@@ -99,6 +113,7 @@ async def create_user(
         group = await db.get(UserGroup, body.group_id)
         if group is None or group.tenant_id != admin.tenant_id:
             raise HTTPException(status_code=404, detail="分组不存在")
+    await _check_phone_unique(db, admin.tenant_id, body.phone)
     user = User(
         tenant_id=admin.tenant_id,
         username=body.username,
@@ -107,6 +122,7 @@ async def create_user(
         role=body.role,
         group_id=body.group_id,
         email=body.email,
+        phone=body.phone,
         status=1,
     )
     db.add(user)
@@ -145,6 +161,8 @@ async def update_user(
         group = await db.get(UserGroup, updates["group_id"])
         if group is None or group.tenant_id != admin.tenant_id:
             raise HTTPException(status_code=404, detail="分组不存在")
+    if "phone" in updates:
+        await _check_phone_unique(db, admin.tenant_id, updates["phone"], exclude_user_id=target.id)
     for field, value in updates.items():
         setattr(target, field, value)
     record_audit(db, admin, "update", "user", target.id, {"fields": sorted(updates)},

@@ -2,6 +2,9 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+# 客户文档资料类型（存 KnowledgeDocument.metadata["category"]，不改表）：
+# 取值列表改为 system_settings 可配置（services/doc_categories.py），管理端可增删改
+
 
 class FolderCreate(BaseModel):
     name: str
@@ -40,6 +43,8 @@ class LibraryFileOut(BaseModel):
     # 同步字段（本地 App 冲突检测用）
     content_hash: str | None = None
     updated_at: datetime | None = None
+    # 客户文档资料类型（取自关联知识库文档的 metadata.category，无则 None）
+    category: str | None = None
 
 
 class LibraryFileListOut(BaseModel):
@@ -51,6 +56,23 @@ class LibraryFileUpdate(BaseModel):
     file_name: str | None = None
     folder_id: int | None = None
     customer_id: int | None = None
+
+
+class LibraryFileCategoryUpdate(BaseModel):
+    """修改文件（客户文档）的资料类型。取值在端点按配置校验（services/doc_categories）。"""
+
+    category: str
+
+
+class DocCategoryItem(BaseModel):
+    """资料类型配置项（管理端整体替换用；value 标识 + label 显示名）。"""
+
+    value: str
+    label: str
+
+
+class DocCategoriesUpdate(BaseModel):
+    items: list[DocCategoryItem]
 
 
 class UploadedFileInfo(BaseModel):

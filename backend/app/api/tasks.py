@@ -16,6 +16,7 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 @router.get("", response_model=TaskListOut)
 async def list_tasks(
     status: str | None = Query(None),
+    customer_id: int | None = Query(None),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -24,6 +25,8 @@ async def list_tasks(
     filters = [Task.tenant_id == user.tenant_id]
     if status:
         filters.append(Task.status == status)
+    if customer_id is not None:
+        filters.append(Task.customer_id == customer_id)
 
     total = await db.scalar(select(func.count()).select_from(Task).where(*filters))
     stmt = (

@@ -2,13 +2,14 @@
 // 单/多文件上传：files 为 File 数组；folderUpload 时 paths 取 webkitRelativePath 保留目录结构
 import request from './index'
 
-export function uploadLibraryFiles({ files, paths, folder_id, customer_id, kb_ids }) {
+export function uploadLibraryFiles({ files, paths, folder_id, customer_id, kb_ids, category }) {
   const formData = new FormData()
   files.forEach((f) => formData.append('files', f))
   if (paths?.length) paths.forEach((p) => formData.append('paths', p))
   if (folder_id) formData.append('folder_id', folder_id)
   if (customer_id) formData.append('customer_id', customer_id)
   if (kb_ids?.length) kb_ids.forEach((id) => formData.append('kb_ids', id))
+  if (category) formData.append('category', category)
   return request.post('/api/v1/library/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 300000,
