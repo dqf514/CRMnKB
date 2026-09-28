@@ -24,6 +24,11 @@
       <!-- 中部弹性滚动区：工作区列表；admin 处于 /admin 路由时替换为管理菜单 -->
       <div class="side-scroll">
         <template v-if="showAdminMenu">
+          <!-- 返回工作台：恢复最近打开的工作区（studio 自动 reopen 上次的 Notebook） -->
+          <button class="btn-back" @click="goBackFromAdmin">
+            <el-icon :size="15"><Back /></el-icon>
+            <span>返回工作台</span>
+          </button>
           <div v-for="g in adminGroups" :key="g.key" class="side-group">
             <div class="side-group-label">{{ g.label }}</div>
             <div
@@ -150,6 +155,8 @@
       <!-- 移动端顶栏：品牌 + 铃铛 -->
       <el-header v-if="isMobile" class="m-header">
         <div class="m-brand">
+          <!-- admin 页：显眼的返回入口（移动端没有侧栏管理菜单） -->
+          <el-icon v-if="showAdminMenu" :size="20" class="m-back" @click="goBackFromAdmin"><Back /></el-icon>
           <img class="brand-logo brand-logo-sm" :src="brandStore.logoUrl" :alt="brandStore.systemName" />
           <span class="brand-name">{{ brandStore.systemName }}</span>
         </div>
@@ -257,7 +264,7 @@ import {
   User, UserFilled, List, SetUp, Collection, Avatar, ArrowDown, Bell, Notebook,
   Sunny, Moon, Files, MoreFilled, ArrowRight, Plus, Search,
   Setting, Cpu, DataAnalysis, Monitor, WarningFilled, Delete, Tickets, MagicStick, Connection,
-  Stamp,
+  Stamp, Back,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
@@ -339,6 +346,11 @@ const adminGroups = [
 ]
 const adminPaths = adminGroups.flatMap((g) => g.items.map((m) => m.path))
 const showAdminMenu = computed(() => isAdmin.value && route.path.startsWith('/admin'))
+
+// 从系统管理返回工作台：/studio 会自动恢复最近打开的工作区（studio store 记 LAST_NB_KEY）
+function goBackFromAdmin() {
+  router.push('/studio')
+}
 
 // ========== 侧栏主操作 ==========
 // 「新的任务」：新建工作区并跳到工作台（沿用 Studio 原 TopBar 的新建逻辑）
@@ -621,6 +633,35 @@ onUnmounted(() => {
   border: 1px solid var(--app-line);
   border-radius: 4px;
   padding: 1px 5px;
+}
+
+/* 管理菜单顶部的返回按钮：主色实心，与工作区列表区分明显 */
+.btn-back {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin: 4px 0 10px;
+  padding: 8px 0;
+  border: none;
+  border-radius: 8px;
+  background: var(--el-color-primary);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.btn-back:hover {
+  background: var(--el-color-primary-dark-2);
+}
+
+/* 移动端顶栏返回箭头 */
+.m-back {
+  cursor: pointer;
+  color: var(--el-color-primary);
+  flex: none;
 }
 
 /* 中部滚动区：工作区列表 / 管理菜单 */
