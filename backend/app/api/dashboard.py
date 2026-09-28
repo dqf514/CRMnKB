@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.models.customer import Customer
+from app.models.library_file import LibraryFile
 from app.models.notebook import Notebook, NotebookNote
 from app.models.user import User
 from app.services.dashboard import daily_report, today_overview
@@ -35,6 +36,8 @@ async def get_daily_report(
 
 class CaptureRequest(BaseModel):
     text: str = Field(min_length=1, max_length=5000)
+    # 附件：文档库文件 id（前端先上传到文档库默认目录再带入），最多 9 个
+    file_ids: list[int] | None = Field(default=None, max_length=9)
 
 
 @router.post("/capture", status_code=201)
@@ -64,6 +67,24 @@ async def quick_capture(
         )
         db.add(nb)
         await db.flush()
+
+    # 附件：校验文件归属本租户且未软删，并入随手记笔记本的源文件（供该工作区问答检索）
+    attachments: list[dict] = []
+    if body.file_ids:
+        files = (
+            await db.execute(
+                select(LibraryFile).where(
+                    LibraryFile.id.in_(body.file_ids),
+                    LibraryFile.tenant_id == user.tenant_id,
+                    LibraryFile.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+        attachments = [{"id": f.id, "name": f.file_name} for f in files]
+        if attachments:
+            merged = list(dict.fromkeys([*(nb.source_file_ids or []), *(f.id for f in files)]))
+            nb.source_file_ids = merged  # JSONB 整体重赋值以触发变更检测
+
     first_line = body.text.strip().splitlines()[0][:40]
     note = NotebookNote(
         tenant_id=user.tenant_id,
@@ -71,6 +92,7 @@ async def quick_capture(
         title=first_line or "随手记",
         content=body.text.strip(),
         source_type="capture",
+        source_ref={"attachments": attachments} if attachments else None,
     )
     db.add(note)
     await db.commit()
@@ -91,4 +113,9 @@ async def quick_capture(
         for cid, name in customers
         if name and len(name) >= 2 and name in text
     ][:5]
-    return {"note_id": note.id, "notebook_id": nb.id, "suggested_customers": suggested}
+    return {
+        "note_id": note.id,
+        "notebook_id": nb.id,
+        "suggested_customers": suggested,
+        "attachments": attachments,
+    }

@@ -12,13 +12,36 @@
       <!-- 中栏：随手记 + 统计行 + 待办与跟进 -->
       <section class="col-main rise d1">
         <div class="capture-row">
-          <el-input
-            v-model="captureText"
-            type="textarea"
-            :rows="2"
-            placeholder="随手记：想到什么先记下来（提到客户名会自动识别建议关联）"
-            @keydown.ctrl.enter="handleCapture"
-          />
+          <div class="capture-input-wrap">
+            <el-input
+              v-model="captureText"
+              type="textarea"
+              :rows="5"
+              placeholder="随手记：想到什么先记下来（提到客户名会自动识别建议关联），可带附件"
+              @keydown.ctrl.enter="handleCapture"
+            />
+            <div class="capture-bar">
+              <el-tooltip content="添加附件（上传到文档库并随笔记归档）" placement="bottom">
+                <el-button link class="attach-btn" :disabled="capturing" @click="attachInput?.click()">
+                  <el-icon :size="16"><Paperclip /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <input ref="attachInput" type="file" multiple hidden :accept="acceptStr" @change="onAttachChange" />
+              <span v-if="captureFiles.length" class="attach-count">{{ captureFiles.length }} 个附件</span>
+              <span class="capture-hint">Ctrl+Enter 记下</span>
+            </div>
+            <div v-if="captureFiles.length" class="attach-chips">
+              <el-tag
+                v-for="(f, i) in captureFiles"
+                :key="i"
+                size="small"
+                closable
+                effect="plain"
+                class="attach-chip"
+                @close="captureFiles.splice(i, 1)"
+              >{{ f.name }}</el-tag>
+            </div>
+          </div>
           <el-button type="primary" :loading="capturing" :disabled="!captureText.trim()" @click="handleCapture">
             记下
           </el-button>
@@ -100,10 +123,12 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Document } from '@element-plus/icons-vue'
+import { Document, Paperclip } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
 import { getDashboardToday, quickCapture, getDailyReport } from '../api'
+import { uploadLibraryFiles } from '../api/libraryUpload'
+import { ensureUploadFormats, isEnabledExt, enabledAcceptStr } from '../utils/uploadFormats'
 import { formatDateTime } from '../utils/format'
 
 const router = useRouter()
@@ -148,16 +173,47 @@ function actionText(a) {
 const captureText = ref('')
 const capturing = ref(false)
 const capturedSuggestions = ref([])
+// 附件：先选本地文件，点「记下」时上传到文档库默认目录，再把 file_ids 随笔记归档
+const captureFiles = ref([])
+const attachInput = ref(null)
+// 当前启用解析格式（accept 过滤 + 选择校验）；拉取失败时不过滤
+const acceptStr = ref('')
+ensureUploadFormats().then((set) => {
+  acceptStr.value = set ? enabledAcceptStr() : ''
+})
+
+function onAttachChange(e) {
+  const files = [...(e.target.files || [])]
+  e.target.value = ''
+  for (const f of files) {
+    if (!isEnabledExt(f.name)) {
+      ElMessage.warning(`「${f.name}」不是当前支持解析的格式，已忽略`)
+      continue
+    }
+    if (captureFiles.value.length >= 9) {
+      ElMessage.warning('附件最多 9 个')
+      break
+    }
+    captureFiles.value.push(f)
+  }
+}
 
 async function handleCapture() {
   const text = captureText.value.trim()
   if (!text) return
   capturing.value = true
   try {
-    const res = await quickCapture({ text })
+    // 有附件先上传文档库（默认目录），拿到 file_ids 随笔记归档
+    let fileIds = []
+    if (captureFiles.value.length) {
+      const up = await uploadLibraryFiles({ files: captureFiles.value })
+      fileIds = (up?.files || []).map((f) => f.id)
+    }
+    const res = await quickCapture({ text, file_ids: fileIds.length ? fileIds : undefined })
     capturedSuggestions.value = res.suggested_customers || []
     captureText.value = ''
-    ElMessage.success('已记入「随手记」笔记本')
+    captureFiles.value = []
+    ElMessage.success(fileIds.length ? `已记入「随手记」笔记本（含 ${fileIds.length} 个附件）` : '已记入「随手记」笔记本')
     load()  // 刷新今日新增计数
   } finally {
     capturing.value = false
@@ -240,6 +296,42 @@ onMounted(load)
   display: flex;
   gap: 10px;
   align-items: flex-end;
+}
+.capture-input-wrap {
+  flex: 1;
+  min-width: 0;
+}
+.capture-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.attach-btn {
+  padding: 2px 4px;
+  color: var(--app-ink-2);
+}
+.attach-btn:hover {
+  color: var(--el-color-primary);
+}
+.attach-count {
+  font-size: 12px;
+  color: var(--app-ink-2);
+}
+.capture-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--app-ink-2);
+  opacity: 0.7;
+}
+.attach-chips {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.attach-chip {
+  max-width: 240px;
 }
 .capture-sugg {
   margin-top: 8px;

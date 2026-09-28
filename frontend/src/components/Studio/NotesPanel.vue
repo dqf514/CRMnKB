@@ -64,6 +64,9 @@
 
       <div class="editor-meta">
         <span>来源: {{ selectedNote.source_type }}</span>
+        <span v-if="selectedNote.source_ref?.attachments?.length" class="meta-link">
+          附件：{{ selectedNote.source_ref.attachments.map((a) => a.name).join('、') }}
+        </span>
         <span v-if="selectedNote.source_ref?.saved_as_document_id" class="meta-link">
           已转知识库文档 #{{ selectedNote.source_ref.saved_as_document_id }}
         </span>
