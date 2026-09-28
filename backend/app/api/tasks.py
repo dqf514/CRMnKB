@@ -13,6 +13,11 @@ from app.schemas.task import TaskCreate, TaskListOut, TaskOut, TaskUpdate
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
 
+def _utcnow() -> datetime:
+    """naive UTC（项目约定：连接时区已固定 UTC，列均为 timestamp without time zone）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 @router.get("", response_model=TaskListOut)
 async def list_tasks(
     status: str | None = Query(None),
@@ -92,7 +97,7 @@ async def update_task(
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(task, field, value)
     if task.status == "completed" and task.completed_at is None:
-        task.completed_at = datetime.now(timezone.utc)
+        task.completed_at = _utcnow()
     await db.commit()
     await db.refresh(task)
     return task
@@ -106,7 +111,7 @@ async def complete_task(
 ):
     task = await _get_task_or_404(db, user.tenant_id, task_id)
     task.status = "completed"
-    task.completed_at = datetime.now(timezone.utc)
+    task.completed_at = _utcnow()
     await db.commit()
     await db.refresh(task)
     return task

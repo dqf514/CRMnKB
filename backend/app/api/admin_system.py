@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import platform
 import time
+from pathlib import Path
 
 import psutil
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -199,3 +201,76 @@ async def reset_sandbox(
     )
     await db.commit()
     return {"ok": True, "backup": backup_name}
+
+
+# ---------------------------------------------------------------------------
+# 系统更新（裸机部署：git pull + 延迟重启，脚本路径由 UPDATE_SCRIPT 配置）
+# ---------------------------------------------------------------------------
+
+# 输出截断上限（git pull/构建日志可能很长，只回传尾部）
+_UPDATE_OUTPUT_TAIL = 4000
+
+
+async def _git_short_head() -> str | None:
+    """当前提交短哈希（本地读取，失败静默返回 None）。"""
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--short", "HEAD",
+            cwd=repo_root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+        return out.decode("utf-8", "replace").strip() or None
+    except Exception:
+        return None
+
+
+async def _run_update_script(script: str) -> tuple[int, str]:
+    """执行更新脚本，返回 (exit_code, 输出尾部)。超时 10 分钟强杀。"""
+    proc = await asyncio.create_subprocess_exec(
+        "bash", script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 124, "更新脚本执行超时（10 分钟），已终止"
+    text_out = out.decode("utf-8", "replace")
+    return proc.returncode, text_out[-_UPDATE_OUTPUT_TAIL:]
+
+
+@router.get("/system/update-info")
+async def update_info(admin: User = Depends(require_admin)):
+    """更新功能状态：是否已配置脚本 + 当前版本（commit 短哈希）。"""
+    script = settings.UPDATE_SCRIPT
+    return {
+        "enabled": bool(script),
+        "commit": await _git_short_head() if script else None,
+    }
+
+
+@router.post("/system/update")
+async def system_update(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """执行系统更新脚本（git pull → 依赖/前端构建 → 脚本内延迟重启后端）。
+
+    安全边界：脚本路径只能来自后端配置 UPDATE_SCRIPT，不接受请求传参；
+    仅 admin 可调用；全程记审计。脚本负责在最后 `sleep N && systemctl restart`
+    延迟重启，保证本响应先返回。
+    """
+    script = (settings.UPDATE_SCRIPT or "").strip()
+    if not script:
+        raise HTTPException(status_code=400, detail="未配置 UPDATE_SCRIPT（系统更新未启用）")
+    if not Path(script).is_file():
+        raise HTTPException(status_code=500, detail=f"更新脚本不存在: {script}")
+    record_audit(db, admin, "update", "system", None, {"action": "system_update", "script": script})
+    await db.commit()  # 先落审计：脚本结尾会重启本进程，事后提交不可靠
+    code, output = await _run_update_script(script)
+    return {"ok": code == 0, "exit_code": code, "output": output}

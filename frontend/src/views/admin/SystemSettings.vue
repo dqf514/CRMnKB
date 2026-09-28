@@ -157,6 +157,19 @@
           <el-button type="primary" size="small" :loading="saving" @click="saveDocCategories">保存</el-button>
         </div>
       </el-tab-pane>
+      <el-tab-pane label="系统更新" name="update" v-if="updateInfo.enabled">
+        <div class="hint formats-hint">
+          从 GitHub 拉取最新代码并自动重启后端（git pull → 按需安装依赖/构建前端 → 延迟重启）。
+          更新期间服务会短暂中断（约十几秒），请在空闲时段操作。
+        </div>
+        <div class="update-row">
+          <span class="update-current">当前版本：<code>{{ updateInfo.commit || '未知' }}</code></span>
+          <el-button type="primary" :loading="updating" @click="handleSystemUpdate">
+            检查并更新
+          </el-button>
+        </div>
+        <pre v-if="updateOutput" class="update-output">{{ updateOutput }}</pre>
+      </el-tab-pane>
     </el-tabs>
   </el-card>
 </template>
@@ -164,8 +177,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Upload } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
-import { getBrand, updateBrand, uploadBrandLogo, getParseFormats, updateParseFormats, getLoginIntegrations, updateLoginIntegrations, getEmailGuide, updateEmailGuide, getDocCategories, updateDocCategories } from '../../api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getBrand, updateBrand, uploadBrandLogo, getParseFormats, updateParseFormats, getLoginIntegrations, updateLoginIntegrations, getEmailGuide, updateEmailGuide, getDocCategories, updateDocCategories, getSystemUpdateInfo, runSystemUpdate } from '../../api'
 import { useBrandStore } from '../../stores/brand'
 import { useDocCategoryStore } from '../../stores/docCategories'
 
@@ -375,12 +388,48 @@ async function saveDocCategories() {
 const activeTab = ref('brand')
 const saving = ref(false)
 
+// ========== 系统更新（裸机部署；UPDATE_SCRIPT 未配置时整个 tab 不显示） ==========
+const updateInfo = ref({ enabled: false, commit: null })
+const updating = ref(false)
+const updateOutput = ref('')
+
+async function loadUpdateInfo() {
+  try {
+    updateInfo.value = await getSystemUpdateInfo()
+  } catch { /* 未配置或接口不可用时保持隐藏 */ }
+}
+
+async function handleSystemUpdate() {
+  await ElMessageBox.confirm(
+    '将从 GitHub 拉取最新代码并自动重启后端，更新期间服务短暂中断。确定继续吗？',
+    '系统更新',
+    { type: 'warning', confirmButtonText: '开始更新', cancelButtonText: '取消' },
+  ).catch(() => Promise.reject(new Error('cancel')))
+  updating.value = true
+  updateOutput.value = ''
+  try {
+    const res = await runSystemUpdate()
+    updateOutput.value = res.output || ''
+    if (res.ok) {
+      ElMessage.success('更新完成，后端正在重启，请稍后刷新页面')
+      loadUpdateInfo()
+    } else {
+      ElMessage.error(`更新失败（退出码 ${res.exit_code}），详见下方日志`)
+    }
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    updating.value = false
+  }
+}
+
 onMounted(() => {
   loadBrand()
   loadFormats()
   loadLoginCfg()
   loadEmailGuide()
   loadDocCategories()
+  loadUpdateInfo()
 })
 </script>
 
@@ -453,5 +502,34 @@ onMounted(() => {
 }
 .footer {
   margin-top: 8px;
+}
+.update-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.update-current {
+  font-size: 13px;
+  color: var(--app-ink-2);
+}
+.update-current code {
+  background: var(--app-bg);
+  border: 1px solid var(--app-line);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+.update-output {
+  margin-top: 14px;
+  max-height: 360px;
+  overflow: auto;
+  background: var(--app-bg);
+  border: 1px solid var(--app-line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--app-ink-2);
 }
 </style>

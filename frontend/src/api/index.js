@@ -265,6 +265,10 @@ export const getBackups = () => request.get('/api/v1/admin/system/backups')
 export const restoreBackup = (name) => request.post(`/api/v1/admin/system/backups/${name}/restore`)
 // 沙箱数据重置（危险操作，仅 dev/sandbox 环境可用）
 export const resetSandbox = () => request.post('/api/v1/admin/system/reset-sandbox')
+
+// 系统更新（裸机部署；UPDATE_SCRIPT 未配置时 enabled=false，前端不显示按钮）
+export const getSystemUpdateInfo = () => request.get('/api/v1/admin/system/update-info')
+export const runSystemUpdate = () => request.post('/api/v1/admin/system/update')
 export const getAdminErrors = (params) => request.get('/api/v1/admin/errors', { params })
 export const resolveAdminError = (id) => request.post(`/api/v1/admin/errors/${id}/resolve`)
 export const resolveAllAdminErrors = () => request.post('/api/v1/admin/errors/resolve_all')

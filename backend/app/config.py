@@ -130,6 +130,12 @@ class Settings(BaseSettings):
     # 提醒规则引擎调度间隔（分钟）
     REMINDER_INTERVAL_MINUTES: int = 10
 
+    # 系统更新脚本（裸机部署用；「系统设置 → 系统更新」按钮触发，admin 限定）。
+    # 指向服务器上的 shell 脚本绝对路径（模板见 deploy/update.sh），脚本负责
+    # git pull → 依赖安装/前端构建 → 延迟 systemctl restart。留空 = 功能关闭，
+    # 前端按钮不显示。脚本路径只能在这里配置，不接受前端传参（防命令注入）。
+    UPDATE_SCRIPT: str = ""
+
     # SMTP 邮件服务（工作流 send_email 动作用；SMTP_HOST 为空时邮件功能降级）
     SMTP_HOST: str = ""
     SMTP_PORT: int = 465

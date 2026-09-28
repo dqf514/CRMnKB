@@ -306,7 +306,9 @@ async def _run_rule(session: AsyncSession, rule: ReminderRule, now: datetime) ->
 
 async def run_all_rules(tenant_id: int | None = None) -> dict:
     """跑一轮启用的提醒规则。tenant_id 限定单租户（手动触发）；None 跑全部（调度循环）。"""
-    now = datetime.now(timezone.utc)
+    # naive UTC（项目约定：DB 时间戳均为 timestamp without time zone，
+    # 与查询出的 naive 值做减法时带时区会抛 TypeError）
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     tasks_created = 0
     notifications_created = 0
     async with AsyncSessionLocal() as session:
