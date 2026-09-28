@@ -8,7 +8,7 @@ admin 在 /agent-approvals/{id}/decide 批准后由本模块同步执行对应�
 不能把半截数据留在 session 里随 commit 写入）。
 """
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,8 @@ from app.models.agent_approval import AgentApproval
 from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.models.notification import Notification
+from app.models.opportunity import Opportunity
+from app.models.task import Task
 from app.models.user import User
 from app.services.audit import record_audit
 from app.services.email import send_email
@@ -24,7 +26,20 @@ from app.services.email import send_email
 logger = logging.getLogger(__name__)
 
 # 支持审批流的写工具白名单（MCP 写工具 ↔ 执行器的一一映射）
-APPROVAL_TOOL_NAMES = {"crm_add_followup", "mail_draft_create"}
+APPROVAL_TOOL_NAMES = {
+    "crm_add_followup",
+    "mail_draft_create",
+    "crm_create_customer",
+    "crm_update_customer",
+    "crm_delete_customer",
+    "crm_create_opportunity",
+    "crm_create_task",
+}
+
+# 客户阶段/任务优先级/商机阶段合法值（与前端 format.js 枚举一致）
+_CUSTOMER_STATUSES = {"potential", "intention", "negotiating", "closed", "lost"}
+_TASK_PRIORITIES = {"high", "medium", "low"}
+_OPP_STAGES = {"prospecting", "qualification", "proposal", "negotiation", "closed_won", "closed_lost"}
 
 
 class ApprovalError(Exception):
@@ -157,6 +172,173 @@ async def _exec_mail_draft_create(db: AsyncSession, approval: AgentApproval, arg
     return f"邮件已发送至 {to}（主题「{subject}」）"
 
 
+# ---------------------------------------------------------------------------
+# CRM 写工具执行器（dsh 基座阶段 3：agent 自然语言驱动业务操作）
+# ---------------------------------------------------------------------------
+
+# crm_update_customer 允许更新的字段白名单（其余字段一律忽略，防越权改 tenant/owner）
+_CUSTOMER_UPDATABLE = {
+    "name", "company", "position", "wechat", "phone", "email", "address",
+    "source", "status", "birthday", "industries", "tags", "ddq_status", "profile",
+}
+
+
+def _parse_date(value: str | None, field: str) -> date | None:
+    """ISO 日期字符串 → date；空返回 None，非法抛 ApprovalError。"""
+    value = (value or "").strip()
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(value[:10])
+    except ValueError:
+        raise ApprovalError(f"{field} 日期格式非法（应为 YYYY-MM-DD）：{value}") from None
+
+
+async def _get_tenant_customer(db: AsyncSession, tenant_id: int, customer_id) -> Customer:
+    """取客户并强制租户归属与软删校验（所有客户相关执行器共用）。"""
+    customer = await db.get(Customer, int(customer_id or 0))
+    if (
+        customer is None
+        or customer.tenant_id != tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise ApprovalError("客户不存在或已删除")
+    return customer
+
+
+async def _exec_crm_create_customer(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+    name = (args.get("name") or "").strip()
+    if not name:
+        raise ApprovalError("客户名称为空")
+    status = (args.get("status") or "potential").strip()
+    if status not in _CUSTOMER_STATUSES:
+        raise ApprovalError(f"客户状态非法：{status}")
+    customer = Customer(
+        tenant_id=approval.tenant_id,
+        name=name,
+        company=(args.get("company") or "").strip() or None,
+        position=(args.get("position") or "").strip() or None,
+        wechat=(args.get("wechat") or "").strip() or None,
+        phone=(args.get("phone") or "").strip() or None,
+        email=(args.get("email") or "").strip() or None,
+        address=(args.get("address") or "").strip() or None,
+        source=(args.get("source") or "").strip() or None,
+        status=status,
+        industries=[str(x) for x in (args.get("industries") or []) if str(x).strip()],
+        tags=[str(x) for x in (args.get("tags") or []) if str(x).strip()],
+        birthday=_parse_date(args.get("birthday"), "birthday"),
+        owner_id=approval.requester_user_id,
+    )
+    # 提取资料写入客户画像（agent 从会议纪要等文档整理出的 Markdown）
+    profile = (args.get("profile") or "").strip()
+    if profile:
+        customer.profile = profile
+        customer.profile_status = "ready"
+        customer.profile_updated_at = _utcnow()
+    db.add(customer)
+    await db.flush()
+    return f"客户已创建（id={customer.id}，主页 /customers/{customer.id}）"
+
+
+async def _exec_crm_update_customer(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+    customer = await _get_tenant_customer(db, approval.tenant_id, args.get("customer_id"))
+    fields = args.get("fields") or {}
+    changed: list[str] = []
+    for key in _CUSTOMER_UPDATABLE:
+        if key not in fields:
+            continue
+        value = fields[key]
+        if key == "status" and value not in _CUSTOMER_STATUSES:
+            raise ApprovalError(f"客户状态非法：{value}")
+        if key == "ddq_status" and value not in {"none", "pending", "completed"}:
+            raise ApprovalError(f"DDQ 状态非法：{value}")
+        if key in {"industries", "tags"}:
+            value = [str(x) for x in (value or []) if str(x).strip()]
+        if key == "birthday":
+            value = _parse_date(value, "birthday")
+        if key == "name" and not (value or "").strip():
+            raise ApprovalError("客户名称不能为空")
+        setattr(customer, key, value)
+        changed.append(key)
+    if not changed:
+        raise ApprovalError("没有可更新的字段")
+    if "profile" in changed:
+        customer.profile_status = "ready"
+        customer.profile_updated_at = _utcnow()
+    await db.flush()
+    return f"客户「{customer.name}」已更新（字段：{', '.join(changed)}）"
+
+
+async def _exec_crm_delete_customer(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+    customer = await _get_tenant_customer(db, approval.tenant_id, args.get("customer_id"))
+    customer.deleted_at = _utcnow()  # 软删，回收站可恢复
+    await db.flush()
+    return f"客户「{customer.name}」已删除（软删，可在回收站恢复）"
+
+
+async def _exec_crm_create_opportunity(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+    customer = await _get_tenant_customer(db, approval.tenant_id, args.get("customer_id"))
+    name = (args.get("name") or "").strip()
+    if not name:
+        raise ApprovalError("商机名称为空")
+    stage = (args.get("stage") or "prospecting").strip()
+    if stage not in _OPP_STAGES:
+        raise ApprovalError(f"商机阶段非法：{stage}")
+    try:
+        amount = float(args.get("amount") or 0)
+    except (TypeError, ValueError):
+        raise ApprovalError("商机金额非法") from None
+    probability = max(0, min(int(args.get("probability") or 0), 100))
+    opp = Opportunity(
+        customer_id=customer.id,
+        name=name,
+        amount=amount,
+        stage=stage,
+        probability=probability,
+        expected_close_date=_parse_date(args.get("expected_close_date"), "expected_close_date"),
+        owner_id=approval.requester_user_id,
+    )
+    db.add(opp)
+    await db.flush()
+    return f"商机已创建（id={opp.id}，客户「{customer.name}」，金额 ¥{amount:,.2f}）"
+
+
+async def _exec_crm_create_task(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+    title = (args.get("title") or "").strip()
+    if not title:
+        raise ApprovalError("任务标题为空")
+    customer_id = args.get("customer_id")
+    customer: Customer | None = None
+    if customer_id is not None:
+        customer = await _get_tenant_customer(db, approval.tenant_id, customer_id)
+    priority = (args.get("priority") or "medium").strip()
+    if priority not in _TASK_PRIORITIES:
+        raise ApprovalError(f"任务优先级非法：{priority}")
+    due_raw = (args.get("due_date") or "").strip()
+    due: datetime | None = None
+    if due_raw:
+        try:
+            due = datetime.fromisoformat(due_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+        except ValueError:
+            raise ApprovalError(f"截止日期格式非法：{due_raw}") from None
+    task = Task(
+        tenant_id=approval.tenant_id,
+        customer_id=customer.id if customer else None,
+        user_id=approval.requester_user_id,
+        title=title,
+        description=(args.get("description") or "").strip() or None,
+        type="follow_up",
+        priority=priority,
+        due_date=due,
+        ai_generated=True,
+        source="ai_analysis",
+    )
+    db.add(task)
+    await db.flush()
+    suffix = f"，关联客户「{customer.name}」" if customer else ""
+    return f"任务已创建（id={task.id}{suffix}）"
+
+
 async def execute_approval(db: AsyncSession, approval: AgentApproval) -> str:
     """按 tool_name 分发执行已批准的动作，返回执行结果文本。"""
     args = approval.arguments or {}
@@ -164,6 +346,16 @@ async def execute_approval(db: AsyncSession, approval: AgentApproval) -> str:
         return await _exec_crm_add_followup(db, approval, args)
     if approval.tool_name == "mail_draft_create":
         return await _exec_mail_draft_create(db, approval, args)
+    if approval.tool_name == "crm_create_customer":
+        return await _exec_crm_create_customer(db, approval, args)
+    if approval.tool_name == "crm_update_customer":
+        return await _exec_crm_update_customer(db, approval, args)
+    if approval.tool_name == "crm_delete_customer":
+        return await _exec_crm_delete_customer(db, approval, args)
+    if approval.tool_name == "crm_create_opportunity":
+        return await _exec_crm_create_opportunity(db, approval, args)
+    if approval.tool_name == "crm_create_task":
+        return await _exec_crm_create_task(db, approval, args)
     raise ApprovalError(f"未知工具: {approval.tool_name}")
 
 

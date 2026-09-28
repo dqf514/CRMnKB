@@ -18,6 +18,8 @@ from app.models.audit_log import AuditLog
 from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.models.notification import Notification
+from app.models.opportunity import Opportunity
+from app.models.task import Task
 from app.models.user import User
 from app.services import agent_approvals as svc
 from app.services.agent_approvals import ApprovalError, create_approval, decide_approval
@@ -213,6 +215,169 @@ async def test_decide_non_pending_rejected():
     approval = _approval(status="executed")
     with pytest.raises(ApprovalError, match="已处理"):
         await decide_approval(_FakeSession(), approval, _user(10, role="admin"), "approve")
+
+
+# ---------------------------------------------------------------------------
+# 服务层：CRM 写工具执行器（阶段 3：建/改/删客户、建商机、建任务）
+# ---------------------------------------------------------------------------
+
+
+async def test_decide_approve_create_customer_executes():
+    """批准建客户：画像写入 profile 并置 ready，owner 归属发起人，空数组元素被过滤。"""
+    approval = _approval(
+        tool_name="crm_create_customer",
+        arguments={
+            "name": "Alex Borissov", "company": "新加坡财富管理公司",
+            "position": "Principal", "status": "intention",
+            "industries": ["金融", ""], "tags": None,
+            "birthday": "1980-05-01",
+            "profile": "## 基本信息\n会议纪要提取资料",
+        },
+    )
+    db = _FakeSession()
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    customers = [o for o in db.added if isinstance(o, Customer)]
+    assert len(customers) == 1
+    c = customers[0]
+    assert c.name == "Alex Borissov"
+    assert c.tenant_id == 1
+    assert c.owner_id == 1  # 归属发起人
+    assert c.status == "intention"
+    assert c.industries == ["金融"]  # 空值被过滤
+    assert c.profile == "## 基本信息\n会议纪要提取资料"
+    assert c.profile_status == "ready"
+    assert c.profile_updated_at is not None
+    assert "/customers/" in approval.result  # 结果含客户主页链接
+
+
+async def test_decide_approve_create_customer_bad_status_fails():
+    approval = _approval(
+        tool_name="crm_create_customer",
+        arguments={"name": "X", "status": "vip"},
+    )
+    db = _FakeSession()
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "状态非法" in approval.result
+    assert not [o for o in db.added if isinstance(o, Customer)]  # 未落库
+
+
+async def test_decide_approve_update_customer_whitelist():
+    """批准改客户：白名单字段生效，tenant_id 等越权字段被忽略。"""
+    cust = _customer()
+    approval = _approval(
+        tool_name="crm_update_customer",
+        arguments={
+            "customer_id": 5,
+            "fields": {"phone": "139", "status": "negotiating", "tenant_id": 99, "profile": "新画像"},
+        },
+    )
+    db = _FakeSession(get_map={(Customer, 5): cust})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    assert cust.phone == "139"
+    assert cust.status == "negotiating"
+    assert cust.tenant_id == 1  # 白名单外字段未生效
+    assert cust.profile == "新画像"
+    assert cust.profile_status == "ready"
+
+
+async def test_decide_approve_update_customer_empty_fields_fails():
+    approval = _approval(
+        tool_name="crm_update_customer",
+        arguments={"customer_id": 5, "fields": {"owner_id": 9}},  # 全在白名单外
+    )
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "没有可更新的字段" in approval.result
+
+
+async def test_decide_approve_delete_customer_soft_deletes():
+    cust = _customer()
+    approval = _approval(tool_name="crm_delete_customer", arguments={"customer_id": 5})
+    db = _FakeSession(get_map={(Customer, 5): cust})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    assert cust.deleted_at is not None  # 软删
+    assert "回收站" in approval.result
+
+
+async def test_decide_approve_delete_cross_tenant_fails():
+    cust = _customer(tenant_id=2)
+    approval = _approval(tool_name="crm_delete_customer", arguments={"customer_id": 5})
+    db = _FakeSession(get_map={(Customer, 5): cust})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "客户不存在" in approval.result
+    assert cust.deleted_at is None  # 未动
+
+
+async def test_decide_approve_create_opportunity_executes():
+    approval = _approval(
+        tool_name="crm_create_opportunity",
+        arguments={
+            "customer_id": 5, "name": "年度采购", "amount": "120000",
+            "stage": "proposal", "probability": 150, "expected_close_date": "2026-12-31",
+        },
+    )
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    opps = [o for o in db.added if isinstance(o, Opportunity)]
+    assert len(opps) == 1
+    o = opps[0]
+    assert o.customer_id == 5
+    assert o.amount == 120000.0
+    assert o.stage == "proposal"
+    assert o.probability == 100  # 截断到 0-100
+    assert o.owner_id == 1
+
+
+async def test_decide_approve_create_opportunity_bad_stage_fails():
+    approval = _approval(
+        tool_name="crm_create_opportunity",
+        arguments={"customer_id": 5, "name": "X", "stage": "winning"},
+    )
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "阶段非法" in approval.result
+    assert not [o for o in db.added if isinstance(o, Opportunity)]
+
+
+async def test_decide_approve_create_task_executes():
+    approval = _approval(
+        tool_name="crm_create_task",
+        arguments={
+            "customer_id": 5, "title": "下周拜访", "priority": "high",
+            "due_date": "2026-10-01T09:00:00",
+        },
+    )
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    tasks = [o for o in db.added if isinstance(o, Task)]
+    assert len(tasks) == 1
+    t = tasks[0]
+    assert t.title == "下周拜访"
+    assert t.customer_id == 5
+    assert t.tenant_id == 1
+    assert t.ai_generated is True
+    assert t.due_date == datetime(2026, 10, 1, 9, 0)
+
+
+async def test_decide_approve_create_task_without_customer():
+    approval = _approval(
+        tool_name="crm_create_task",
+        arguments={"title": "整理周报"},
+    )
+    db = _FakeSession()
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    tasks = [o for o in db.added if isinstance(o, Task)]
+    assert tasks[0].customer_id is None
 
 
 # ---------------------------------------------------------------------------

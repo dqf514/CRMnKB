@@ -14,9 +14,18 @@ from app.services import mcp_server
 from app.services.mcp_server import (
     McpToolError,
     crm_add_followup_impl,
+    crm_create_customer_impl,
+    crm_create_opportunity_impl,
+    crm_create_task_impl,
+    crm_delete_customer_impl,
     crm_get_customer_impl,
     crm_list_customers_impl,
+    crm_list_followups_impl,
+    crm_list_opportunities_impl,
+    crm_list_tasks_impl,
     crm_search_customers_impl,
+    crm_stats_impl,
+    crm_update_customer_impl,
     kb_list_impl,
     mail_draft_create_impl,
 )
@@ -279,3 +288,192 @@ async def test_mail_draft_create_requires_to_and_subject():
         await mail_draft_create_impl(db, _user(), None, "", "主题", "正文")
     with pytest.raises(McpToolError, match="不能为空"):
         await mail_draft_create_impl(db, _user(), None, "a@b.com", " ", "正文")
+
+
+# ---------------------------------------------------------------------------
+# 阶段 3 读工具：跟进/商机/任务清单 + 经营概览
+# ---------------------------------------------------------------------------
+
+
+def _followup(fid=31, **kw):
+    base = {
+        "id": fid, "customer_id": 5, "type": "call", "content": "电话沟通",
+        "next_step": "下周拜访",
+        "created_at": datetime(2026, 9, 1, tzinfo=timezone.utc),
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def test_crm_list_followups_tenant_scoped():
+    db = _FakeSession(results=[[(_followup(), "甲公司")]])
+    result = await crm_list_followups_impl(db, _user(), days=7)
+    assert len(result) == 1
+    r = result[0]
+    assert r["customer_name"] == "甲公司"
+    assert r["next_step"] == "下周拜访"
+    assert r["created_at"] == "2026-09-01T00:00:00+00:00"
+    stmt = str(db.statements[0].whereclause)
+    assert "tenant_id" in stmt  # 经 Customer join 做租户隔离
+    assert "deleted_at" in stmt
+
+
+def _opportunity(oid=41, **kw):
+    base = {
+        "id": oid, "customer_id": 5, "name": "年度采购", "amount": 100000,
+        "stage": "negotiation", "probability": 60, "expected_close_date": None,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def test_crm_list_opportunities_tenant_scoped():
+    db = _FakeSession(results=[[(_opportunity(), "甲公司")]])
+    result = await crm_list_opportunities_impl(db, _user(), stage="negotiation")
+    assert len(result) == 1
+    r = result[0]
+    assert r["amount"] == 100000.0
+    assert r["stage"] == "negotiation"
+    stmt = str(db.statements[0].whereclause)
+    assert "tenant_id" in stmt
+
+
+def _task(tid=51, **kw):
+    base = {
+        "id": tid, "title": "下周拜访", "status": "pending", "priority": "high",
+        "due_date": None, "customer_id": 5,
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def test_crm_list_tasks_tenant_scoped():
+    db = _FakeSession(results=[[(_task(), "甲公司")]])
+    result = await crm_list_tasks_impl(db, _user(), status="pending")
+    assert len(result) == 1
+    r = result[0]
+    assert r["title"] == "下周拜访"
+    assert r["customer_name"] == "甲公司"
+    stmt = str(db.statements[0].whereclause)
+    assert "tenant_id" in stmt
+
+
+async def test_crm_stats_aggregates():
+    db = _FakeSession(results=[
+        [("intention", 2), ("potential", 1)],  # 客户按状态
+        [("negotiation", 1, 50000)],           # 商机按阶段
+        [3],   # open tasks（scalar）
+        [1],   # overdue tasks（scalar）
+        [4],   # 近 7 天跟进（scalar）
+        [9],   # 近 30 天跟进（scalar）
+    ])
+    result = await crm_stats_impl(db, _user())
+    assert result["customers"]["total"] == 3
+    assert result["customers"]["by_status"] == {"intention": 2, "potential": 1}
+    assert result["opportunities"]["by_stage"]["negotiation"] == {"count": 1, "amount": 50000.0}
+    assert result["tasks"] == {"open": 3, "overdue": 1}
+    assert result["followups"] == {"last_7_days": 4, "last_30_days": 9}
+    # 全部语句租户隔离
+    for stmt in db.statements:
+        assert "tenant_id" in str(stmt.whereclause)
+
+
+# ---------------------------------------------------------------------------
+# 阶段 3 写工具：只落审批单，不落业务数据
+# ---------------------------------------------------------------------------
+
+
+async def test_crm_create_customer_creates_approval_only():
+    db = _FakeSession(results=[[_user(10, role="admin")]])  # create_approval 查 admin
+    args = {"name": "Alex Borissov", "company": "新加坡财富管理公司", "profile": "画像"}
+    result = await crm_create_customer_impl(db, _user(), args)
+    assert result["status"] == "pending_approval"
+    assert "审批" in result["message"]
+    approval = [o for o in db.added if isinstance(o, AgentApproval)][0]
+    assert approval.tool_name == "crm_create_customer"
+    assert approval.arguments["name"] == "Alex Borissov"
+    assert "Alex Borissov" in approval.summary
+    assert db.committed
+    assert not [o for o in db.added if isinstance(o, Customer)]  # 不落业务库
+
+
+async def test_crm_create_customer_blank_name():
+    with pytest.raises(McpToolError, match="不能为空"):
+        await crm_create_customer_impl(_FakeSession(), _user(), {"name": "  "})
+
+
+async def test_crm_update_customer_creates_approval_only():
+    db = _FakeSession(
+        results=[[_user(10, role="admin")]],
+        get_map={(Customer, 5): _customer()},
+    )
+    result = await crm_update_customer_impl(db, _user(), 5, {"phone": "139", "profile": None})
+    assert result["status"] == "pending_approval"
+    approval = [o for o in db.added if isinstance(o, AgentApproval)][0]
+    assert approval.tool_name == "crm_update_customer"
+    # None 值字段被过滤（表示不修改）
+    assert approval.arguments == {"customer_id": 5, "fields": {"phone": "139"}}
+    assert "甲公司" in approval.summary
+    assert "phone" in approval.summary
+
+
+async def test_crm_update_customer_missing():
+    with pytest.raises(McpToolError, match="不存在"):
+        await crm_update_customer_impl(_FakeSession(get_map={}), _user(), 999, {"phone": "1"})
+
+
+async def test_crm_update_customer_no_fields():
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    with pytest.raises(McpToolError, match="没有要更新"):
+        await crm_update_customer_impl(db, _user(), 5, {"phone": None})
+
+
+async def test_crm_delete_customer_creates_approval_only():
+    db = _FakeSession(
+        results=[[_user(10, role="admin")]],
+        get_map={(Customer, 5): _customer()},
+    )
+    result = await crm_delete_customer_impl(db, _user(), 5)
+    assert result["status"] == "pending_approval"
+    approval = [o for o in db.added if isinstance(o, AgentApproval)][0]
+    assert approval.tool_name == "crm_delete_customer"
+    assert approval.arguments == {"customer_id": 5}
+    assert "软删" in approval.summary
+
+
+async def test_crm_create_opportunity_creates_approval_only():
+    db = _FakeSession(
+        results=[[_user(10, role="admin")]],
+        get_map={(Customer, 5): _customer()},
+    )
+    args = {"customer_id": 5, "name": "年度采购", "amount": 100000}
+    result = await crm_create_opportunity_impl(db, _user(), args)
+    assert result["status"] == "pending_approval"
+    approval = [o for o in db.added if isinstance(o, AgentApproval)][0]
+    assert approval.tool_name == "crm_create_opportunity"
+    assert "年度采购" in approval.summary
+    assert "甲公司" in approval.summary
+
+
+async def test_crm_create_opportunity_missing_customer():
+    with pytest.raises(McpToolError, match="不存在"):
+        await crm_create_opportunity_impl(_FakeSession(get_map={}), _user(), {"customer_id": 999, "name": "X"})
+
+
+async def test_crm_create_task_creates_approval_only():
+    db = _FakeSession(
+        results=[[_user(10, role="admin")]],
+        get_map={(Customer, 5): _customer()},
+    )
+    args = {"title": "下周拜访", "customer_id": 5, "due_date": "2026-10-01"}
+    result = await crm_create_task_impl(db, _user(), args)
+    assert result["status"] == "pending_approval"
+    approval = [o for o in db.added if isinstance(o, AgentApproval)][0]
+    assert approval.tool_name == "crm_create_task"
+    assert "下周拜访" in approval.summary
+    assert "甲公司" in approval.summary
+
+
+async def test_crm_create_task_blank_title():
+    with pytest.raises(McpToolError, match="不能为空"):
+        await crm_create_task_impl(_FakeSession(), _user(), {"title": " "})

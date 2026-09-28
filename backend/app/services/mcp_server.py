@@ -15,7 +15,7 @@ JWT（aud=dsh-mcp，ACP 阶段由 acp_bridge 在每会话 session/new|resume 时
 """
 import logging
 from contextlib import asynccontextmanager
-from datetime import timezone
+from datetime import datetime, timedelta, timezone
 
 import jwt
 from mcp.server.fastmcp import Context, FastMCP
@@ -32,6 +32,7 @@ from app.models.document import KnowledgeDocument
 from app.models.follow_up import FollowUpRecord
 from app.models.knowledge_base import KnowledgeBase
 from app.models.opportunity import Opportunity
+from app.models.task import Task
 from app.models.user import User
 from app.services.agent_approvals import create_approval
 from app.services.llm import resolve_embed_llm
@@ -66,11 +67,15 @@ class McpToolError(Exception):
 kb_mcp = FastMCP(
     "kb",
     instructions=(
-        "企业内部知识库 + CRM（dsh 基座阶段 2）。只读工具：kb_search 混合检索切片、"
+        "企业内部知识库 + CRM（dsh 基座阶段 3）。只读工具：kb_search 混合检索切片、"
         "kb_read_doc 读整份文档、kb_list 列出可读知识库、crm_list_customers 客户全量名单与总数、"
-        "crm_search_customers 模糊检索客户、crm_get_customer 客户详情、web_search 联网搜索、web_fetch 抓取网页。"
-        "写工具（crm_add_followup / mail_draft_create）不直接生效，"
-        "只创建审批单，管理员批准后由系统自动执行。只能访问令牌所属用户有权限的资料。"
+        "crm_search_customers 模糊检索客户、crm_get_customer 客户详情、"
+        "crm_list_followups 跟进清单、crm_list_opportunities 商机清单、crm_list_tasks 任务清单、"
+        "crm_stats 经营概览统计、web_search 联网搜索、web_fetch 抓取网页。"
+        "写工具（crm_create_customer / crm_update_customer / crm_delete_customer / "
+        "crm_create_opportunity / crm_create_task / crm_add_followup / mail_draft_create）"
+        "不直接生效，只创建审批单，管理员批准后由系统自动执行。"
+        "只能访问令牌所属用户有权限的资料。"
     ),
     streamable_http_path="/api/mcp",
 )
@@ -474,6 +479,183 @@ async def crm_get_customer_impl(db: AsyncSession, user: User, customer_id: int) 
     return result
 
 
+# ---------------------------------------------------------------------------
+# 阶段 3：CRM 分析/清单读工具（直接读，无需审批）
+# ---------------------------------------------------------------------------
+
+
+def _utcnow() -> datetime:
+    """naive UTC（项目约定：连接时区已固定 UTC，见 database.py）。"""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def crm_list_followups_impl(
+    db: AsyncSession, user: User, customer_id: int | None = None,
+    days: int | None = None, limit: int = 20,
+) -> list[dict]:
+    """跟进记录清单（crm_list_followups 的实现）。经 Customer join 做租户隔离。"""
+    limit = max(1, min(int(limit), 100))
+    stmt = (
+        select(FollowUpRecord, Customer.name)
+        .join(Customer, Customer.id == FollowUpRecord.customer_id)
+        .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+        .order_by(FollowUpRecord.created_at.desc())
+        .limit(limit)
+    )
+    if customer_id is not None:
+        stmt = stmt.where(FollowUpRecord.customer_id == int(customer_id))
+    if days:
+        stmt = stmt.where(FollowUpRecord.created_at >= _utcnow() - timedelta(days=int(days)))
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "id": f.id,
+            "customer_id": f.customer_id,
+            "customer_name": cname,
+            "type": f.type,
+            "content": f.content,
+            "next_step": f.next_step,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        for f, cname in rows
+    ]
+
+
+async def crm_list_opportunities_impl(
+    db: AsyncSession, user: User, customer_id: int | None = None,
+    stage: str | None = None, limit: int = 50,
+) -> list[dict]:
+    """商机清单（crm_list_opportunities 的实现）。经 Customer join 做租户隔离。"""
+    limit = max(1, min(int(limit), 100))
+    stmt = (
+        select(Opportunity, Customer.name)
+        .join(Customer, Customer.id == Opportunity.customer_id)
+        .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+        .order_by(Opportunity.updated_at.desc())
+        .limit(limit)
+    )
+    if customer_id is not None:
+        stmt = stmt.where(Opportunity.customer_id == int(customer_id))
+    if stage:
+        stmt = stmt.where(Opportunity.stage == stage)
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "id": o.id,
+            "customer_id": o.customer_id,
+            "customer_name": cname,
+            "name": o.name,
+            "amount": float(o.amount or 0),
+            "stage": o.stage,
+            "probability": o.probability,
+            "expected_close_date": (
+                o.expected_close_date.isoformat() if o.expected_close_date else None
+            ),
+        }
+        for o, cname in rows
+    ]
+
+
+async def crm_list_tasks_impl(
+    db: AsyncSession, user: User, status: str | None = None,
+    customer_id: int | None = None, limit: int = 50,
+) -> list[dict]:
+    """任务清单（crm_list_tasks 的实现）。Task 自带 tenant_id。"""
+    limit = max(1, min(int(limit), 100))
+    stmt = (
+        select(Task, Customer.name)
+        .outerjoin(Customer, Customer.id == Task.customer_id)
+        .where(Task.tenant_id == user.tenant_id)
+        .order_by(Task.created_at.desc())
+        .limit(limit)
+    )
+    if status:
+        stmt = stmt.where(Task.status == status)
+    if customer_id is not None:
+        stmt = stmt.where(Task.customer_id == int(customer_id))
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "id": t.id,
+            "title": t.title,
+            "status": t.status,
+            "priority": t.priority,
+            "due_date": t.due_date.isoformat() if t.due_date else None,
+            "customer_id": t.customer_id,
+            "customer_name": cname,
+        }
+        for t, cname in rows
+    ]
+
+
+async def crm_stats_impl(db: AsyncSession, user: User) -> dict:
+    """CRM 经营概览（crm_stats 的实现）：客户阶段分布、商机漏斗、任务与跟进节奏。"""
+    now = _utcnow()
+    cust_rows = (
+        await db.execute(
+            select(Customer.status, func.count(Customer.id))
+            .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+            .group_by(Customer.status)
+        )
+    ).all()
+    opp_rows = (
+        await db.execute(
+            select(
+                Opportunity.stage,
+                func.count(Opportunity.id),
+                func.coalesce(func.sum(Opportunity.amount), 0),
+            )
+            .join(Customer, Customer.id == Opportunity.customer_id)
+            .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+            .group_by(Opportunity.stage)
+        )
+    ).all()
+    open_tasks = await db.scalar(
+        select(func.count(Task.id)).where(
+            Task.tenant_id == user.tenant_id, Task.status.in_(("pending", "in_progress"))
+        )
+    )
+    overdue_tasks = await db.scalar(
+        select(func.count(Task.id)).where(
+            Task.tenant_id == user.tenant_id,
+            Task.status.in_(("pending", "in_progress")),
+            Task.due_date.is_not(None),
+            Task.due_date < now,
+        )
+    )
+    followups_7d = await db.scalar(
+        select(func.count(FollowUpRecord.id))
+        .join(Customer, Customer.id == FollowUpRecord.customer_id)
+        .where(
+            Customer.tenant_id == user.tenant_id,
+            Customer.deleted_at.is_(None),
+            FollowUpRecord.created_at >= now - timedelta(days=7),
+        )
+    )
+    followups_30d = await db.scalar(
+        select(func.count(FollowUpRecord.id))
+        .join(Customer, Customer.id == FollowUpRecord.customer_id)
+        .where(
+            Customer.tenant_id == user.tenant_id,
+            Customer.deleted_at.is_(None),
+            FollowUpRecord.created_at >= now - timedelta(days=30),
+        )
+    )
+    return {
+        "customers": {
+            "total": sum(int(c) for _, c in cust_rows),
+            "by_status": {s: int(c) for s, c in cust_rows},
+        },
+        "opportunities": {
+            "by_stage": {
+                s: {"count": int(c), "amount": float(a)} for s, c, a in opp_rows
+            },
+        },
+        "tasks": {"open": int(open_tasks or 0), "overdue": int(overdue_tasks or 0)},
+        "followups": {"last_7_days": int(followups_7d or 0), "last_30_days": int(followups_30d or 0)},
+    }
+
+
 async def crm_add_followup_impl(
     db: AsyncSession, user: User, customer_id: int, content: str, next_plan: str = ""
 ) -> dict:
@@ -555,6 +737,108 @@ async def mail_draft_create_impl(
     }
 
 
+# ---------------------------------------------------------------------------
+# 阶段 3：审批制 CRM 写工具（建/改/删客户、建商机、建任务）
+# 统一约定：工具只创建审批单（写前做基础校验，保证摘要准确），
+# admin 在 Agent 审批页批准后由 agent_approvals 的执行器落库。
+# ---------------------------------------------------------------------------
+
+
+async def _pending_approval_result(db: AsyncSession, user: User, tool: str, args: dict, summary: str) -> dict:
+    """创建审批单 + commit + 统一返回（写工具共用收口）。"""
+    approval = await create_approval(db, user, tool, args, summary)
+    await db.commit()
+    return {
+        "status": "pending_approval",
+        "approval_id": approval.id,
+        "message": "已提交审批，管理员批准后自动执行；请明确告知用户「需管理员审批后生效」",
+    }
+
+
+async def crm_create_customer_impl(db: AsyncSession, user: User, args: dict) -> dict:
+    """申请新建客户（crm_create_customer 的实现）。"""
+    name = (args.get("name") or "").strip()
+    if not name:
+        raise McpToolError("客户名称不能为空")
+    parts = [f"新建客户「{name}」"]
+    if args.get("company"):
+        parts.append(f"单位「{args['company']}」")
+    if args.get("phone"):
+        parts.append(f"电话 {args['phone']}")
+    return await _pending_approval_result(db, user, "crm_create_customer", args, "，".join(parts))
+
+
+async def crm_update_customer_impl(db: AsyncSession, user: User, customer_id: int, fields: dict) -> dict:
+    """申请更新客户字段（crm_update_customer 的实现）。fields 只含要改的字段。"""
+    customer = await db.get(Customer, int(customer_id))
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise McpToolError("客户不存在")
+    fields = {k: v for k, v in (fields or {}).items() if v is not None}
+    if not fields:
+        raise McpToolError("没有要更新的字段")
+    summary = f"更新客户「{customer.name}」字段：{', '.join(fields.keys())}"
+    return await _pending_approval_result(
+        db, user, "crm_update_customer", {"customer_id": customer.id, "fields": fields}, summary
+    )
+
+
+async def crm_delete_customer_impl(db: AsyncSession, user: User, customer_id: int) -> dict:
+    """申请删除客户（crm_delete_customer 的实现）。软删，回收站可恢复。"""
+    customer = await db.get(Customer, int(customer_id))
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise McpToolError("客户不存在")
+    return await _pending_approval_result(
+        db, user, "crm_delete_customer", {"customer_id": customer.id},
+        f"删除客户「{customer.name}」（软删，可在回收站恢复）",
+    )
+
+
+async def crm_create_opportunity_impl(db: AsyncSession, user: User, args: dict) -> dict:
+    """申请新增商机（crm_create_opportunity 的实现）。"""
+    customer = await db.get(Customer, int(args.get("customer_id") or 0))
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise McpToolError("客户不存在")
+    name = (args.get("name") or "").strip()
+    if not name:
+        raise McpToolError("商机名称不能为空")
+    summary = f"客户「{customer.name}」新增商机「{name}」"
+    if args.get("amount"):
+        summary += f"，金额 ¥{args['amount']}"
+    return await _pending_approval_result(db, user, "crm_create_opportunity", args, summary)
+
+
+async def crm_create_task_impl(db: AsyncSession, user: User, args: dict) -> dict:
+    """申请新增任务（crm_create_task 的实现）。"""
+    title = (args.get("title") or "").strip()
+    if not title:
+        raise McpToolError("任务标题不能为空")
+    summary = f"新增任务「{title}」"
+    if args.get("customer_id") is not None:
+        customer = await db.get(Customer, int(args["customer_id"]))
+        if (
+            customer is None
+            or customer.tenant_id != user.tenant_id
+            or customer.deleted_at is not None
+        ):
+            raise McpToolError("客户不存在")
+        summary += f"（关联客户「{customer.name}」）"
+    if args.get("due_date"):
+        summary += f"，截止 {args['due_date']}"
+    return await _pending_approval_result(db, user, "crm_create_task", args, summary)
+
+
 @kb_mcp.tool(
     name="kb_list",
     description="列出当前用户可读的知识库（kb_id、名称、类型、文档数），用于发现可检索范围。",
@@ -625,6 +909,186 @@ async def _crm_add_followup_tool(
     async with AsyncSessionLocal() as db:
         user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
         return await crm_add_followup_impl(db, user, customer_id, content, next_plan)
+
+
+# ---------------------------------------------------------------------------
+# 阶段 3 工具注册：CRM 清单/分析读工具 + 审批制写工具
+# ---------------------------------------------------------------------------
+
+
+@kb_mcp.tool(
+    name="crm_list_followups",
+    description=(
+        "列出跟进记录（可按客户 customer_id 或最近 days 天过滤），返回客户名、类型、内容、"
+        "下一步与时间。回答「最近跟进了哪些客户 / 某客户最近沟通情况」时使用。"
+    ),
+)
+async def _crm_list_followups_tool(
+    customer_id: int | None = None, days: int | None = None, limit: int = 20, ctx: Context = None
+) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_list_followups_impl(db, user, customer_id, days, limit)
+
+
+@kb_mcp.tool(
+    name="crm_list_opportunities",
+    description=(
+        "列出商机（可按客户 customer_id 或阶段 stage 过滤），返回客户名、金额、阶段、"
+        "赢单概率与预计成交日。回答「在手商机 / 商机漏斗 / 预计成交」时使用。"
+    ),
+)
+async def _crm_list_opportunities_tool(
+    customer_id: int | None = None, stage: str | None = None, limit: int = 50, ctx: Context = None
+) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_list_opportunities_impl(db, user, customer_id, stage, limit)
+
+
+@kb_mcp.tool(
+    name="crm_list_tasks",
+    description=(
+        "列出任务/待办（可按状态 status: pending/in_progress/completed/cancelled 或客户过滤），"
+        "返回标题、状态、优先级、截止日与关联客户。回答「待办有哪些 / 逾期任务」时使用。"
+    ),
+)
+async def _crm_list_tasks_tool(
+    status: str | None = None, customer_id: int | None = None, limit: int = 50, ctx: Context = None
+) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_list_tasks_impl(db, user, status, customer_id, limit)
+
+
+@kb_mcp.tool(
+    name="crm_stats",
+    description=(
+        "CRM 经营概览统计：客户总数与阶段分布、商机分阶段数量与金额、进行中/逾期任务数、"
+        "近 7/30 天跟进次数。做客户经营分析、月度复盘类问题时先用本工具取数。"
+    ),
+)
+async def _crm_stats_tool(ctx: Context = None) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_stats_impl(db, user)
+
+
+@kb_mcp.tool(
+    name="crm_create_customer",
+    description=(
+        "申请新建客户（写操作，需管理员审批后生效）。从会议纪要/文档中提取到联系人时，"
+        "把整理好的资料写进 profile（Markdown，会作为客户画像展示）。"
+        "status 取值：potential/intention/negotiating/closed/lost。"
+        "成功后请在回答中说明「已提交审批，管理员批准后生效」。"
+    ),
+)
+async def _crm_create_customer_tool(
+    name: str,
+    company: str = "",
+    position: str = "",
+    phone: str = "",
+    email: str = "",
+    wechat: str = "",
+    address: str = "",
+    source: str = "",
+    status: str = "potential",
+    industries: list[str] | None = None,
+    tags: list[str] | None = None,
+    birthday: str = "",
+    profile: str = "",
+    ctx: Context = None,
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        args = {
+            "name": name, "company": company, "position": position, "phone": phone,
+            "email": email, "wechat": wechat, "address": address, "source": source,
+            "status": status, "industries": industries or [], "tags": tags or [],
+            "birthday": birthday, "profile": profile,
+        }
+        return await crm_create_customer_impl(db, user, args)
+
+
+@kb_mcp.tool(
+    name="crm_update_customer",
+    description=(
+        "申请更新客户资料（写操作，需管理员审批后生效）。fields 只放要改的字段，"
+        "可改：name/company/position/wechat/phone/email/address/source/status/"
+        "industries/tags/birthday(YYYY-MM-DD)/ddq_status(none/pending/completed)/profile。"
+    ),
+)
+async def _crm_update_customer_tool(
+    customer_id: int, fields: dict, ctx: Context = None
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_update_customer_impl(db, user, customer_id, fields)
+
+
+@kb_mcp.tool(
+    name="crm_delete_customer",
+    description=(
+        "申请删除客户（写操作，需管理员审批后生效；软删，回收站可恢复）。"
+        "仅在用户明确要求删除时使用，调用前先用 crm_get_customer 确认对象。"
+    ),
+)
+async def _crm_delete_customer_tool(customer_id: int, ctx: Context = None) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await crm_delete_customer_impl(db, user, customer_id)
+
+
+@kb_mcp.tool(
+    name="crm_create_opportunity",
+    description=(
+        "申请为客户新增商机（写操作，需管理员审批后生效）。"
+        "stage 取值：prospecting/qualification/proposal/negotiation/closed_won/closed_lost；"
+        "expected_close_date 格式 YYYY-MM-DD；probability 0-100。"
+    ),
+)
+async def _crm_create_opportunity_tool(
+    customer_id: int,
+    name: str,
+    amount: float = 0,
+    stage: str = "prospecting",
+    probability: int = 0,
+    expected_close_date: str = "",
+    ctx: Context = None,
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        args = {
+            "customer_id": customer_id, "name": name, "amount": amount,
+            "stage": stage, "probability": probability,
+            "expected_close_date": expected_close_date,
+        }
+        return await crm_create_opportunity_impl(db, user, args)
+
+
+@kb_mcp.tool(
+    name="crm_create_task",
+    description=(
+        "申请新增任务/待办（写操作，需管理员审批后生效），可关联客户。"
+        "priority 取值：high/medium/low；due_date 为 ISO 时间（如 2026-09-30T18:00:00）。"
+        "从跟进记录/会议纪要提取后续行动时使用。"
+    ),
+)
+async def _crm_create_task_tool(
+    title: str,
+    customer_id: int | None = None,
+    due_date: str = "",
+    priority: str = "medium",
+    description: str = "",
+    ctx: Context = None,
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        args = {
+            "title": title, "customer_id": customer_id, "due_date": due_date,
+            "priority": priority, "description": description,
+        }
+        return await crm_create_task_impl(db, user, args)
 
 
 @kb_mcp.tool(
