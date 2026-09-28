@@ -227,6 +227,28 @@ async def _git_short_head() -> str | None:
         return None
 
 
+async def _git(*args: str, timeout: int = 60) -> tuple[int, str]:
+    """在仓库根目录执行 git 子命令，返回 (exit_code, 输出)。失败/超时返回非零码。"""
+    proc = None
+    try:
+        repo_root = Path(__file__).resolve().parents[3]
+        proc = await asyncio.create_subprocess_exec(
+            "git", *args,
+            cwd=repo_root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return proc.returncode, out.decode("utf-8", "replace").strip()
+    except TimeoutError:
+        if proc:
+            proc.kill()
+            await proc.wait()
+        return 124, "git 命令超时"
+    except Exception as exc:
+        return 1, str(exc)
+
+
 async def _run_update_script(script: str) -> tuple[int, str]:
     """执行更新脚本，返回 (exit_code, 输出尾部)。超时 10 分钟强杀。"""
     proc = await asyncio.create_subprocess_exec(
@@ -251,6 +273,33 @@ async def update_info(admin: User = Depends(require_admin)):
     return {
         "enabled": bool(script),
         "commit": await _git_short_head() if script else None,
+    }
+
+
+@router.post("/system/check-update")
+async def check_update(admin: User = Depends(require_admin)):
+    """检查远端是否有新提交（git fetch + 比对上游分支），只检查不更新。
+
+    返回 {ok, behind, latest, commit}；fetch 失败（如网络不通）返回 ok=False + error，
+    由前端提示，不抛 500。
+    """
+    if not (settings.UPDATE_SCRIPT or "").strip():
+        raise HTTPException(status_code=400, detail="未配置 UPDATE_SCRIPT（系统更新未启用）")
+    code, out = await _git("fetch", "origin")
+    if code != 0:
+        return {"ok": False, "error": f"git fetch 失败：{out[-300:]}"}
+    code, behind = await _git("rev-list", "--count", "HEAD..@{u}", timeout=15)
+    if code != 0:
+        return {"ok": False, "error": "当前分支未跟踪上游，无法比对更新"}
+    behind_n = int(behind or 0)
+    latest = None
+    if behind_n:
+        _, latest = await _git("log", "-1", "--format=%h %s", "@{u}", timeout=15)
+    return {
+        "ok": True,
+        "behind": behind_n,
+        "latest": latest,
+        "commit": await _git_short_head(),
     }
 
 

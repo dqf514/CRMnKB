@@ -178,7 +178,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getBrand, updateBrand, uploadBrandLogo, getParseFormats, updateParseFormats, getLoginIntegrations, updateLoginIntegrations, getEmailGuide, updateEmailGuide, getDocCategories, updateDocCategories, getSystemUpdateInfo, runSystemUpdate } from '../../api'
+import { getBrand, updateBrand, uploadBrandLogo, getParseFormats, updateParseFormats, getLoginIntegrations, updateLoginIntegrations, getEmailGuide, updateEmailGuide, getDocCategories, updateDocCategories, getSystemUpdateInfo, checkSystemUpdate, runSystemUpdate } from '../../api'
 import { useBrandStore } from '../../stores/brand'
 import { useDocCategoryStore } from '../../stores/docCategories'
 
@@ -400,14 +400,25 @@ async function loadUpdateInfo() {
 }
 
 async function handleSystemUpdate() {
-  await ElMessageBox.confirm(
-    '将从 GitHub 拉取最新代码并自动重启后端，更新期间服务短暂中断。确定继续吗？',
-    '系统更新',
-    { type: 'warning', confirmButtonText: '开始更新', cancelButtonText: '取消' },
-  ).catch(() => Promise.reject(new Error('cancel')))
   updating.value = true
   updateOutput.value = ''
   try {
+    // 先检查远端是否有新提交：无更新直接提示，有更新再询问是否执行
+    const chk = await checkSystemUpdate()
+    if (!chk.ok) {
+      ElMessage.error(chk.error || '检查更新失败（网络不可达？）')
+      return
+    }
+    if (chk.commit) updateInfo.value.commit = chk.commit
+    if (!chk.behind) {
+      ElMessage.success('当前已是最新版本')
+      return
+    }
+    await ElMessageBox.confirm(
+      `发现 ${chk.behind} 个新提交${chk.latest ? `（最新：${chk.latest}）` : ''}。更新将从 GitHub 拉取代码并自动重启后端，期间服务短暂中断。是否现在更新？`,
+      '发现新版本',
+      { type: 'warning', confirmButtonText: '现在更新', cancelButtonText: '取消' },
+    ).catch(() => Promise.reject(new Error('cancel')))
     const res = await runSystemUpdate()
     updateOutput.value = res.output || ''
     if (res.ok) {
@@ -417,7 +428,7 @@ async function handleSystemUpdate() {
       ElMessage.error(`更新失败（退出码 ${res.exit_code}），详见下方日志`)
     }
   } catch {
-    /* 拦截器已提示 */
+    /* 取消或拦截器已提示 */
   } finally {
     updating.value = false
   }

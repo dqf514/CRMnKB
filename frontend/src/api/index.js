@@ -268,6 +268,7 @@ export const resetSandbox = () => request.post('/api/v1/admin/system/reset-sandb
 
 // 系统更新（裸机部署；UPDATE_SCRIPT 未配置时 enabled=false，前端不显示按钮）
 export const getSystemUpdateInfo = () => request.get('/api/v1/admin/system/update-info')
+export const checkSystemUpdate = () => request.post('/api/v1/admin/system/check-update')
 export const runSystemUpdate = () => request.post('/api/v1/admin/system/update')
 export const getAdminErrors = (params) => request.get('/api/v1/admin/errors', { params })
 export const resolveAdminError = (id) => request.post(`/api/v1/admin/errors/${id}/resolve`)

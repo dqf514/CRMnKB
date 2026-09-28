@@ -121,3 +121,84 @@ async def test_system_update_script_failure_reported(client, monkeypatch, tmp_pa
     assert resp.status_code == 200  # 脚本失败不抛 500，由前端展示输出
     assert resp.json()["ok"] is False
     assert "冲突" in resp.json()["output"]
+
+
+# ---------------------------------------------------------------------------
+# 检查更新（/admin/system/check-update）
+# ---------------------------------------------------------------------------
+
+
+async def test_check_update_not_configured_400(client, monkeypatch):
+    _override(_FakeSession())
+    monkeypatch.setattr(settings, "UPDATE_SCRIPT", "")
+    resp = await client.post("/api/v1/admin/system/check-update")
+    assert resp.status_code == 400
+
+
+async def test_check_update_non_admin_403(client):
+    _override(_FakeSession(), role="user")
+    resp = await client.post("/api/v1/admin/system/check-update")
+    assert resp.status_code == 403
+
+
+def _fake_git_factory(responses: dict):
+    """按子命令返回预设 (code, output) 的假 _git。"""
+
+    async def _fake_git(*args, timeout=60):
+        return responses.get(args[0], (0, ""))
+
+    return _fake_git
+
+
+async def test_check_update_up_to_date(client, monkeypatch, tmp_path):
+    _override(_FakeSession())
+    monkeypatch.setattr(settings, "UPDATE_SCRIPT", str(tmp_path / "update.sh"))
+    monkeypatch.setattr(
+        "app.api.admin_system._git",
+        _fake_git_factory({"fetch": (0, ""), "rev-list": (0, "0")}),
+    )
+
+    async def _fake_head():
+        return "abc1234"
+
+    monkeypatch.setattr("app.api.admin_system._git_short_head", _fake_head)
+    resp = await client.post("/api/v1/admin/system/check-update")
+    data = resp.json()
+    assert data == {"ok": True, "behind": 0, "latest": None, "commit": "abc1234"}
+
+
+async def test_check_update_behind_reports_latest(client, monkeypatch, tmp_path):
+    _override(_FakeSession())
+    monkeypatch.setattr(settings, "UPDATE_SCRIPT", str(tmp_path / "update.sh"))
+    monkeypatch.setattr(
+        "app.api.admin_system._git",
+        _fake_git_factory({
+            "fetch": (0, ""),
+            "rev-list": (0, "3"),
+            "log": (0, "6710367 feat: xxx"),
+        }),
+    )
+
+    async def _fake_head():
+        return "abc1234"
+
+    monkeypatch.setattr("app.api.admin_system._git_short_head", _fake_head)
+    resp = await client.post("/api/v1/admin/system/check-update")
+    data = resp.json()
+    assert data["ok"] is True and data["behind"] == 3
+    assert data["latest"] == "6710367 feat: xxx"
+
+
+async def test_check_update_fetch_failure_no_500(client, monkeypatch, tmp_path):
+    """网络不通时 fetch 失败：返回 ok=False + error，不抛 500。"""
+    _override(_FakeSession())
+    monkeypatch.setattr(settings, "UPDATE_SCRIPT", str(tmp_path / "update.sh"))
+    monkeypatch.setattr(
+        "app.api.admin_system._git",
+        _fake_git_factory({"fetch": (128, "fatal: unable to access ...")}),
+    )
+    resp = await client.post("/api/v1/admin/system/check-update")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is False
+    assert "git fetch 失败" in data["error"]
