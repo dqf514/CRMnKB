@@ -8,6 +8,7 @@ admin 在 /agent-approvals/{id}/decide 批准后由本模块同步执行对应�
 不能把半截数据留在 session 里随 commit 写入）。
 """
 import logging
+import re
 from datetime import date, datetime, timezone
 
 from sqlalchemy import select
@@ -18,10 +19,12 @@ from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
+from app.models.skill import Skill as SkillRow
 from app.models.task import Task
 from app.models.user import User
 from app.services.audit import record_audit
 from app.services.email import send_email
+from app.services.skills.builtin import BUILTIN_SKILLS
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,7 @@ APPROVAL_TOOL_NAMES = {
     "crm_delete_customer",
     "crm_create_opportunity",
     "crm_create_task",
+    "skill_create_api",
 }
 
 # 客户阶段/任务优先级/商机阶段合法值（与前端 format.js 枚举一致）
@@ -339,6 +343,72 @@ async def _exec_crm_create_task(db: AsyncSession, approval: AgentApproval, args:
     return f"任务已创建（id={task.id}{suffix}）"
 
 
+# ---------------------------------------------------------------------------
+# Skill 生成执行器（AI 起草 API 工具配置，admin 批准后建 skills 行并启用）
+# ---------------------------------------------------------------------------
+
+_SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_SKILL_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH"}
+
+
+async def _exec_skill_create_api(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+    """批准 AI 起草的 API skill 配置：建 skills 行（type=api，enabled=True）。
+
+    安全边界：生成的只是声明式 HTTP 配置，运行时由 ApiSkill 执行——
+    URL 每次调用前过 check_url_safe（SSRF 防护），这里只做静态校验；
+    密钥类 header 在管理端列表接口由 _mask_config 脱敏。
+    """
+    name = (args.get("name") or "").strip()
+    if not name or len(name) > 50 or not _SKILL_NAME_RE.match(name):
+        raise ApprovalError(f"工具名非法（小写字母开头的 snake_case，≤50 字符）：{name}")
+    if name in BUILTIN_SKILLS:
+        raise ApprovalError(f"与内置工具重名：{name}")
+    exists = await db.scalar(
+        select(SkillRow.id).where(
+            SkillRow.tenant_id == approval.tenant_id, SkillRow.name == name
+        )
+    )
+    if exists:
+        raise ApprovalError(f"同名工具已存在：{name}")
+    method = (args.get("method") or "GET").strip().upper()
+    if method not in _SKILL_METHODS:
+        raise ApprovalError(f"请求方法非法：{method}")
+    url = (args.get("url") or "").strip()
+    # url 可含 {{arg}} 占位符（路径/查询部分），scheme 必须是 http/https；
+    # 渲染后的完整 URL 在每次调用时还会过 check_url_safe（SSRF 防护）
+    if not url.startswith(("http://", "https://")):
+        raise ApprovalError(f"URL 非法（需 http/https 开头）：{url}")
+    parameters = args.get("parameters")
+    if parameters is not None and not isinstance(parameters, dict):
+        raise ApprovalError("parameters 必须是 JSON Schema 对象")
+    headers = args.get("headers")
+    if headers is not None and not isinstance(headers, dict):
+        raise ApprovalError("headers 必须是对象")
+    try:
+        timeout = max(10, min(int(args.get("timeout") or 60), 300))
+    except (TypeError, ValueError):
+        raise ApprovalError("timeout 非法") from None
+    skill = SkillRow(
+        tenant_id=approval.tenant_id,
+        name=name,
+        display_name=(args.get("display_name") or "").strip() or None,
+        description=(args.get("description") or "").strip() or None,
+        type="api",
+        enabled=True,
+        config={
+            "method": method,
+            "url": url,
+            "headers": headers or {},
+            "body": args.get("body") or "",
+            "parameters": parameters or {"type": "object", "properties": {}},
+            "timeout": timeout,
+        },
+    )
+    db.add(skill)
+    await db.flush()
+    return f"API 工具已创建并启用（name={name}，{method} {url}；agent 可用 skill_call 调用）"
+
+
 async def execute_approval(db: AsyncSession, approval: AgentApproval) -> str:
     """按 tool_name 分发执行已批准的动作，返回执行结果文本。"""
     args = approval.arguments or {}
@@ -356,6 +426,8 @@ async def execute_approval(db: AsyncSession, approval: AgentApproval) -> str:
         return await _exec_crm_create_opportunity(db, approval, args)
     if approval.tool_name == "crm_create_task":
         return await _exec_crm_create_task(db, approval, args)
+    if approval.tool_name == "skill_create_api":
+        return await _exec_skill_create_api(db, approval, args)
     raise ApprovalError(f"未知工具: {approval.tool_name}")
 
 

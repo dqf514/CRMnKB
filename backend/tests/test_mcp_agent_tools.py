@@ -10,6 +10,7 @@ import pytest
 from app.models.agent_approval import AgentApproval
 from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
+from app.models.skill import Skill as SkillRow
 from app.services import mcp_server
 from app.services.mcp_server import (
     McpToolError,
@@ -28,6 +29,9 @@ from app.services.mcp_server import (
     crm_update_customer_impl,
     kb_list_impl,
     mail_draft_create_impl,
+    skill_call_impl,
+    skill_create_api_impl,
+    skill_list_impl,
 )
 
 
@@ -477,3 +481,97 @@ async def test_crm_create_task_creates_approval_only():
 async def test_crm_create_task_blank_title():
     with pytest.raises(McpToolError, match="不能为空"):
         await crm_create_task_impl(_FakeSession(), _user(), {"title": " "})
+
+
+# ---------------------------------------------------------------------------
+# 阶段 4：skill_list / skill_call / skill_create_api
+# ---------------------------------------------------------------------------
+
+
+def _fake_skill(name="kd_query", **kw):
+    base = {
+        "name": name, "description": "快递查询",
+        "parameters": {"type": "object", "properties": {"no": {"type": "string"}}},
+    }
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+async def test_skill_list_returns_enabled_summaries(monkeypatch):
+    """只返回概要（名称/描述/参数 schema），不返回 config（headers 可能含密钥）。"""
+    async def _enabled(db, tenant_id):
+        return [_fake_skill(), _fake_skill("fx_rate", description="汇率查询")]
+
+    monkeypatch.setattr(mcp_server, "get_enabled_skills", _enabled)
+    result = await skill_list_impl(_FakeSession(), _user())
+    assert [s["name"] for s in result] == ["kd_query", "fx_rate"]
+    assert result[0]["parameters"]["properties"]["no"]["type"] == "string"
+    assert "config" not in result[0]  # 不泄露配置
+
+
+async def test_skill_call_dispatches(monkeypatch):
+    called: dict = {}
+
+    async def _enabled(db, tenant_id):
+        return [_fake_skill()]
+
+    async def _exec(skill, args, ctx):
+        called.update(name=skill.name, args=args, caller=ctx.get("caller"))
+        return "单号 123：运输中"
+
+    monkeypatch.setattr(mcp_server, "get_enabled_skills", _enabled)
+    monkeypatch.setattr(mcp_server, "execute_skill", _exec)
+    result = await skill_call_impl(_FakeSession(), _user(), "kd_query", {"no": "123"})
+    assert result == "单号 123：运输中"
+    assert called == {"name": "kd_query", "args": {"no": "123"}, "caller": "mcp"}
+
+
+async def test_skill_call_not_enabled(monkeypatch):
+    async def _enabled(db, tenant_id):
+        return [_fake_skill()]
+
+    monkeypatch.setattr(mcp_server, "get_enabled_skills", _enabled)
+    with pytest.raises(McpToolError, match="未启用或不存在"):
+        await skill_call_impl(_FakeSession(), _user(), "nope", {})
+
+
+async def test_skill_call_error_wrapped(monkeypatch):
+    async def _enabled(db, tenant_id):
+        return [_fake_skill()]
+
+    async def _exec(skill, args, ctx):
+        raise RuntimeError("连接超时")
+
+    monkeypatch.setattr(mcp_server, "get_enabled_skills", _enabled)
+    monkeypatch.setattr(mcp_server, "execute_skill", _exec)
+    with pytest.raises(McpToolError, match="调用失败"):
+        await skill_call_impl(_FakeSession(), _user(), "kd_query", {})
+
+
+async def test_skill_create_api_creates_approval_only():
+    db = _FakeSession(results=[[_user(10, role="admin")]])  # create_approval 查 admin
+    args = {
+        "name": "kd_query", "display_name": "快递查询", "method": "GET",
+        "url": "https://api.example.com/kd?no={{no}}",
+        "headers": {"Authorization": "Bearer xxx"},
+        "parameters": {"type": "object", "properties": {"no": {"type": "string"}}},
+        "timeout": 30,
+    }
+    result = await skill_create_api_impl(db, _user(), args)
+    assert result["status"] == "pending_approval"
+    approval = [o for o in db.added if isinstance(o, AgentApproval)][0]
+    assert approval.tool_name == "skill_create_api"
+    assert approval.arguments["name"] == "kd_query"
+    assert "快递查询" in approval.summary
+    assert "GET https://api.example.com" in approval.summary
+    assert db.committed
+    assert not [o for o in db.added if isinstance(o, SkillRow)]  # 不落业务库
+
+
+async def test_skill_create_api_validation():
+    with pytest.raises(McpToolError, match="工具名非法"):
+        await skill_create_api_impl(_FakeSession(), _user(), {"name": "Bad Name", "url": "https://a.com"})
+    with pytest.raises(McpToolError, match="请求方法非法"):
+        await skill_create_api_impl(_FakeSession(), _user(), {"name": "ok_name", "method": "HACK", "url": "https://a.com"})
+    with pytest.raises(McpToolError, match="http"):
+        await skill_create_api_impl(_FakeSession(), _user(), {"name": "ok_name", "url": "ftp://a.com"})

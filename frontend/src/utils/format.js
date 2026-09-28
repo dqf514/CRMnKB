@@ -178,10 +178,24 @@ export const toolNameMap = {
   mcp__kb__kb_search: '知识库检索',
   mcp__kb__kb_read_doc: '阅读文档',
   mcp__kb__kb_list: '列出知识库',
+  mcp__kb__crm_list_customers: '客户名单',
   mcp__kb__crm_search_customers: '客户检索',
   mcp__kb__crm_get_customer: '查看客户',
+  mcp__kb__crm_list_followups: '跟进清单',
+  mcp__kb__crm_list_opportunities: '商机清单',
+  mcp__kb__crm_list_tasks: '任务清单',
+  mcp__kb__crm_stats: '经营统计',
   mcp__kb__crm_add_followup: '写跟进（需审批）',
+  mcp__kb__crm_create_customer: '新建客户（需审批）',
+  mcp__kb__crm_update_customer: '更新客户（需审批）',
+  mcp__kb__crm_delete_customer: '删除客户（需审批）',
+  mcp__kb__crm_create_opportunity: '新建商机（需审批）',
+  mcp__kb__crm_create_task: '新建任务（需审批）',
   mcp__kb__mail_draft_create: '邮件草稿（需审批）',
+  // 自定义工具：发现 / 调用 / AI 起草
+  mcp__kb__skill_list: '列出工具',
+  mcp__kb__skill_call: '调用自定义工具',
+  mcp__kb__skill_create_api: '新建工具（需审批）',
 }
 
 // Agent 审批单状态

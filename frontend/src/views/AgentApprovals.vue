@@ -85,7 +85,7 @@ function argEntries(a) {
   return Object.entries(args)
 }
 
-// 常见参数 key → 中文标签（写跟进 / 邮件草稿两类工具的字段）
+// 常见参数 key → 中文标签（CRM / 邮件 / skill 生成工具的字段）
 const ARG_KEY_MAP = {
   customer_id: '客户 ID',
   content: '内容',
@@ -96,7 +96,17 @@ const ARG_KEY_MAP = {
   recipients: '收件人',
   cc: '抄送',
   subject: '主题',
-  body: '正文',
+  body: '正文模板',
+  // skill_create_api
+  name: '工具名',
+  display_name: '显示名',
+  description: '描述',
+  method: '请求方法',
+  url: '接口地址',
+  headers: '请求头',
+  parameters: '参数 Schema',
+  timeout: '超时(秒)',
+  fields: '更新字段',
 }
 function argKeyLabel(k) {
   return ARG_KEY_MAP[k] || k

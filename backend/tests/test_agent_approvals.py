@@ -19,6 +19,7 @@ from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.models.notification import Notification
 from app.models.opportunity import Opportunity
+from app.models.skill import Skill as SkillRow
 from app.models.task import Task
 from app.models.user import User
 from app.services import agent_approvals as svc
@@ -79,6 +80,11 @@ class _FakeSession:
     async def execute(self, stmt, *args, **kwargs):
         self.statements.append(stmt)
         return _FakeResult(self._results.pop(0) if self._results else [])
+
+    async def scalar(self, stmt, *args, **kwargs):
+        self.statements.append(stmt)
+        rows = self._results.pop(0) if self._results else []
+        return rows[0] if rows else None
 
     async def get(self, model, ident):
         return self._get_map.get((model, ident))
@@ -378,6 +384,78 @@ async def test_decide_approve_create_task_without_customer():
     assert approval.status == "executed"
     tasks = [o for o in db.added if isinstance(o, Task)]
     assert tasks[0].customer_id is None
+
+
+# ---------------------------------------------------------------------------
+# 服务层：skill_create_api 执行器（AI 起草 API 工具配置，批准即启用）
+# ---------------------------------------------------------------------------
+
+
+def _skill_approval(**kw):
+    base_args = {
+        "name": "kd_query", "display_name": "快递查询", "method": "GET",
+        "url": "https://api.example.com/kd?no={{no}}",
+        "headers": {"Authorization": "Bearer xxx"},
+        "parameters": {"type": "object", "properties": {"no": {"type": "string"}}},
+        "timeout": 30,
+    }
+    kw.setdefault("tool_name", "skill_create_api")
+    kw.setdefault("arguments", base_args)
+    kw.setdefault("summary", "新建 API 工具「快递查询」（GET https://api.example.com/kd?no={{no}}）")
+    return _approval(**kw)
+
+
+async def test_decide_approve_skill_create_api_executes():
+    db = _FakeSession()  # scalar 查重返回 None（无同名）
+    approval = _skill_approval()
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    skills = [o for o in db.added if isinstance(o, SkillRow)]
+    assert len(skills) == 1
+    s = skills[0]
+    assert s.name == "kd_query"
+    assert s.type == "api"
+    assert s.enabled is True  # 批准即启用
+    assert s.tenant_id == 1
+    assert s.config["method"] == "GET"
+    assert s.config["url"] == "https://api.example.com/kd?no={{no}}"
+    assert s.config["timeout"] == 30
+    assert "skill_call" in approval.result
+
+
+async def test_decide_approve_skill_builtin_name_conflict_fails():
+    approval = _skill_approval(arguments={"name": "web_search", "url": "https://a.com"})
+    db = _FakeSession()
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "重名" in approval.result
+    assert not [o for o in db.added if isinstance(o, SkillRow)]
+
+
+async def test_decide_approve_skill_tenant_duplicate_fails():
+    approval = _skill_approval()
+    db = _FakeSession(results=[[42]])  # scalar 查重命中已有行 id=42
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "已存在" in approval.result
+    assert not [o for o in db.added if isinstance(o, SkillRow)]
+
+
+async def test_decide_approve_skill_bad_name_and_method_fail():
+    approval = _skill_approval(arguments={"name": "快递查询", "url": "https://a.com"})
+    await decide_approval(_FakeSession(), approval, _user(10, role="admin"), "approve")
+    assert approval.status == "failed"
+    assert "工具名非法" in approval.result
+
+    approval2 = _skill_approval(arguments={"name": "ok_name", "method": "HACK", "url": "https://a.com"})
+    await decide_approval(_FakeSession(), approval2, _user(10, role="admin"), "approve")
+    assert approval2.status == "failed"
+    assert "请求方法非法" in approval2.result
+
+    approval3 = _skill_approval(arguments={"name": "ok_name", "url": "ftp://a.com"})
+    await decide_approval(_FakeSession(), approval3, _user(10, role="admin"), "approve")
+    assert approval3.status == "failed"
+    assert "URL 非法" in approval3.result
 
 
 # ---------------------------------------------------------------------------

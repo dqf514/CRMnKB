@@ -14,6 +14,7 @@ JWT（aud=dsh-mcp，ACP 阶段由 acp_bridge 在每会话 session/new|resume 时
 拒绝 aud=dsh-mcp），ACL 在本模块工具实现内按 user_id 强制（复用 permissions 服务）。
 """
 import logging
+import re
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -32,6 +33,7 @@ from app.models.document import KnowledgeDocument
 from app.models.follow_up import FollowUpRecord
 from app.models.knowledge_base import KnowledgeBase
 from app.models.opportunity import Opportunity
+from app.models.skill import Skill as SkillRow
 from app.models.task import Task
 from app.models.user import User
 from app.services.agent_approvals import create_approval
@@ -71,10 +73,11 @@ kb_mcp = FastMCP(
         "kb_read_doc 读整份文档、kb_list 列出可读知识库、crm_list_customers 客户全量名单与总数、"
         "crm_search_customers 模糊检索客户、crm_get_customer 客户详情、"
         "crm_list_followups 跟进清单、crm_list_opportunities 商机清单、crm_list_tasks 任务清单、"
-        "crm_stats 经营概览统计、web_search 联网搜索、web_fetch 抓取网页。"
+        "crm_stats 经营概览统计、skill_list 列出已启用自定义工具、web_search 联网搜索、web_fetch 抓取网页。"
         "写工具（crm_create_customer / crm_update_customer / crm_delete_customer / "
-        "crm_create_opportunity / crm_create_task / crm_add_followup / mail_draft_create）"
-        "不直接生效，只创建审批单，管理员批准后由系统自动执行。"
+        "crm_create_opportunity / crm_create_task / crm_add_followup / mail_draft_create / "
+        "skill_create_api）不直接生效，只创建审批单，管理员批准后由系统自动执行。"
+        "skill_call 用于调用 skill_list 列出的自定义工具。"
         "只能访问令牌所属用户有权限的资料。"
     ),
     streamable_http_path="/api/mcp",
@@ -839,6 +842,68 @@ async def crm_create_task_impl(db: AsyncSession, user: User, args: dict) -> dict
     return await _pending_approval_result(db, user, "crm_create_task", args, summary)
 
 
+# ---------------------------------------------------------------------------
+# 阶段 4：skill 发现/调用 + AI 起草 API 工具（审批制）
+# ---------------------------------------------------------------------------
+
+
+async def skill_list_impl(db: AsyncSession, user: User) -> list[dict]:
+    """已启用自定义工具清单（skill_list 的实现）。
+
+    只返回概要（名称/描述/参数 schema），不返回 config——headers 里可能含密钥，
+    不能经 MCP 暴露给 LLM。
+    """
+    skills = await get_enabled_skills(db, user.tenant_id)
+    return [
+        {
+            "name": s.name,
+            "description": s.description,
+            "parameters": getattr(s, "parameters", None) or {"type": "object", "properties": {}},
+        }
+        for s in skills
+    ]
+
+
+async def skill_call_impl(db: AsyncSession, user: User, skill_name: str, arguments: dict) -> str:
+    """调用已启用自定义工具（skill_call 的实现）。复用超时/截断/调用埋点。"""
+    skills = await get_enabled_skills(db, user.tenant_id)
+    skill = next((s for s in skills if s.name == (skill_name or "").strip()), None)
+    if skill is None:
+        raise McpToolError(f"工具 {skill_name} 未启用或不存在（先用 skill_list 查看可用工具）")
+    try:
+        return await execute_skill(
+            skill, arguments or {}, {"tenant_id": user.tenant_id, "user_id": user.id, "caller": "mcp"}
+        )
+    except McpToolError:
+        raise
+    except Exception as exc:
+        raise McpToolError(f"{skill_name} 调用失败: {exc}") from exc
+
+
+_SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+_SKILL_METHODS = {"GET", "POST", "PUT", "DELETE", "PATCH"}
+
+
+async def skill_create_api_impl(db: AsyncSession, user: User, args: dict) -> dict:
+    """申请新建 API 工具（skill_create_api 的实现）。
+
+    写前做基础校验（name/method/url），保证审批摘要准确；完整的重名/格式校验
+    在执行器里还会再做一次（批准时状态可能已变化）。
+    """
+    name = (args.get("name") or "").strip()
+    if not name or len(name) > 50 or not _SKILL_NAME_RE.match(name):
+        raise McpToolError(f"工具名非法（小写字母开头的 snake_case，≤50 字符）：{name}")
+    method = (args.get("method") or "GET").strip().upper()
+    if method not in _SKILL_METHODS:
+        raise McpToolError(f"请求方法非法：{method}")
+    url = (args.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise McpToolError("url 需以 http:// 或 https:// 开头")
+    label = args.get("display_name") or name
+    summary = f"新建 API 工具「{label}」（{method} {url}）"
+    return await _pending_approval_result(db, user, "skill_create_api", args, summary)
+
+
 @kb_mcp.tool(
     name="kb_list",
     description="列出当前用户可读的知识库（kb_id、名称、类型、文档数），用于发现可检索范围。",
@@ -1114,20 +1179,9 @@ async def _mail_draft_create_tool(
 # ---------------------------------------------------------------------------
 
 
-async def _run_builtin_skill(db: AsyncSession, user: User, name: str, args: dict) -> str:
-    """按名取租户已启用的 builtin skill 并执行（带超时/截断/调用埋点）。"""
-    skills = await get_enabled_skills(db, user.tenant_id)
-    skill = next((s for s in skills if s.name == name), None)
-    if skill is None:
-        raise McpToolError(f"{name} 未启用（请在管理端「Skill 管理」中开启）")
-    try:
-        return await execute_skill(
-            skill, args, {"tenant_id": user.tenant_id, "user_id": user.id, "caller": "mcp"}
-        )
-    except McpToolError:
-        raise
-    except Exception as exc:
-        raise McpToolError(f"{name} 调用失败: {exc}") from exc
+async def _run_tenant_skill(db: AsyncSession, user: User, name: str, args: dict) -> str:
+    """按名取租户已启用的 skill 并执行（带超时/截断/调用埋点）。"""
+    return await skill_call_impl(db, user, name, args)
 
 
 @kb_mcp.tool(
@@ -1140,7 +1194,7 @@ async def _run_builtin_skill(db: AsyncSession, user: User, name: str, args: dict
 async def _web_search_tool(query: str, ctx: Context = None) -> str:
     async with AsyncSessionLocal() as db:
         user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
-        return await _run_builtin_skill(db, user, "web_search", {"query": query})
+        return await _run_tenant_skill(db, user, "web_search", {"query": query})
 
 
 @kb_mcp.tool(
@@ -1150,7 +1204,72 @@ async def _web_search_tool(query: str, ctx: Context = None) -> str:
 async def _web_fetch_tool(url: str, ctx: Context = None) -> str:
     async with AsyncSessionLocal() as db:
         user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
-        return await _run_builtin_skill(db, user, "web_fetch", {"url": url})
+        return await _run_tenant_skill(db, user, "web_fetch", {"url": url})
+
+
+# ---------------------------------------------------------------------------
+# 阶段 4 工具注册：自定义工具发现/调用 + AI 起草 API 工具（审批制）
+# ---------------------------------------------------------------------------
+
+
+@kb_mcp.tool(
+    name="skill_list",
+    description=(
+        "列出当前租户已启用的自定义工具（名称、描述、参数 schema），"
+        "含管理端配置的 API 工具与联网工具。现有工具不够用、或调用 skill_call 前先查可用工具时用。"
+    ),
+)
+async def _skill_list_tool(ctx: Context = None) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await skill_list_impl(db, user)
+
+
+@kb_mcp.tool(
+    name="skill_call",
+    description=(
+        "调用 skill_list 列出的自定义工具，skill_name 为工具名，arguments 按其参数 schema 填写。"
+        "调用失败时检查参数是否符合 schema；工具不存在时先 skill_list 确认。"
+    ),
+)
+async def _skill_call_tool(skill_name: str, arguments: dict | None = None, ctx: Context = None) -> str:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        return await skill_call_impl(db, user, skill_name, arguments)
+
+
+@kb_mcp.tool(
+    name="skill_create_api",
+    description=(
+        "申请新建一个 API 工具（写操作，需管理员审批后生效并自动启用）。"
+        "当现有工具无法满足需求、且用户提供了第三方 HTTP 接口文档时使用："
+        "先用 web_fetch 阅读接口文档，再起草配置——name 为小写 snake_case；"
+        "url/body 中用 {{参数名}} 作占位符；parameters 为 JSON Schema（描述每个参数）；"
+        "headers 放鉴权头（如 Authorization）。批准后工具立即可用 skill_call 调用。"
+        "成功后请在回答中说明「已提交审批，管理员批准后生效」。"
+    ),
+)
+async def _skill_create_api_tool(
+    name: str,
+    url: str,
+    method: str = "GET",
+    display_name: str = "",
+    description: str = "",
+    headers: dict | None = None,
+    body: str = "",
+    parameters: dict | None = None,
+    timeout: int = 60,
+    ctx: Context = None,
+) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        args = {
+            "name": name, "url": url, "method": method,
+            "display_name": display_name, "description": description,
+            "headers": headers, "body": body,
+            "parameters": parameters, "timeout": timeout,
+        }
+        return await skill_create_api_impl(db, user, args)
 
 
 def build_mcp_asgi_app():
