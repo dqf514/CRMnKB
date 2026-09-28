@@ -78,6 +78,8 @@ kb_mcp = FastMCP(
         "crm_create_opportunity / crm_create_task / crm_add_followup / mail_draft_create / "
         "skill_create_api）不直接生效，只创建审批单，管理员批准后由系统自动执行。"
         "skill_call 用于调用 skill_list 列出的自定义工具。"
+        "引用联网搜索结果时，在相关语句末尾用 [序号](URL) 标注来源"
+        "（如「……同比增长 5%[1](https://example.com/a)」），前端会渲染为可点击的来源上标。"
         "只能访问令牌所属用户有权限的资料。"
     ),
     streamable_http_path="/api/mcp",
@@ -1189,6 +1191,7 @@ async def _run_tenant_skill(db: AsyncSession, user: User, name: str, args: dict)
     description=(
         "联网搜索最新信息，返回 Top 结果（标题+摘要+链接）。需要实时资讯/新闻/知识库以外的"
         "公开信息时使用；结果不理想可换关键词重试，并用 web_fetch 打开链接阅读全文。"
+        "引用搜索结果时，在相关语句末尾用 [序号](URL) 标注来源，前端会渲染为可点击上标。"
     ),
 )
 async def _web_search_tool(query: str, ctx: Context = None) -> str:
