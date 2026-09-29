@@ -9,7 +9,7 @@
       <el-tooltip content="刷新">
         <el-button :icon="Refresh" size="small" link @click="refresh" />
       </el-tooltip>
-      <el-tooltip content="工作区 / 报告" placement="bottom">
+      <el-tooltip content="笔记 / 报告" placement="bottom">
         <el-button :icon="Collection" size="small" link @click="sideDrawer = true" />
       </el-tooltip>
     </div>
@@ -59,7 +59,7 @@
               </div>
               <!-- AI 消息操作 -->
               <div v-if="m.role === 'ai'" class="msg-actions">
-                <el-button link size="small" :icon="Notebook" @click="saveAsNote(m, idx)">保存到工作区</el-button>
+                <el-button link size="small" :icon="Notebook" @click="saveAsNote(m, idx)">保存到笔记</el-button>
                 <el-button v-if="m.sources?.length" link size="small" @click="m.showSources = !m.showSources">
                   {{ m.showSources ? '隐藏' : '查看' }}引用 ({{ m.sources.length }})
                 </el-button>
@@ -190,7 +190,7 @@
 
       <div v-if="!isMobile" class="col col-right">
         <div class="col-tabs">
-          <button :class="{ active: studio.activeTab === 'notes' }" @click="studio.activeTab = 'notes'">工作区</button>
+          <button :class="{ active: studio.activeTab === 'notes' }" @click="studio.activeTab = 'notes'">笔记</button>
           <button :class="{ active: studio.activeTab === 'reports' }" @click="studio.activeTab = 'reports'">报告</button>
         </div>
         <NotesPanel v-show="studio.activeTab === 'notes'" />
@@ -204,10 +204,10 @@
         <SourcesPanel />
       </div>
     </el-drawer>
-    <!-- 移动端：工作区 / 报告抽屉 -->
-    <el-drawer v-if="isMobile" v-model="sideDrawer" title="工作区 / 报告" size="88%">
+    <!-- 移动端：笔记 / 报告抽屉 -->
+    <el-drawer v-if="isMobile" v-model="sideDrawer" title="笔记 / 报告" size="88%">
       <div class="col-tabs">
-        <button :class="{ active: studio.activeTab === 'notes' }" @click="studio.activeTab = 'notes'">工作区</button>
+        <button :class="{ active: studio.activeTab === 'notes' }" @click="studio.activeTab = 'notes'">笔记</button>
         <button :class="{ active: studio.activeTab === 'reports' }" @click="studio.activeTab = 'reports'">报告</button>
       </div>
       <NotesPanel v-show="studio.activeTab === 'notes'" />
@@ -319,7 +319,7 @@ watch(
   },
   { immediate: true }
 )
-// 移动端：聊天区全宽，工作区/报告进抽屉；来源选择桌面端走输入区旁 popover，移动端走抽屉
+// 移动端：聊天区全宽，笔记/报告进抽屉；来源选择桌面端走输入区旁 popover，移动端走抽屉
 const isMobile = ref(window.innerWidth < 992)
 const sourcesDrawer = ref(false)
 const sourcesPopover = ref(false)
@@ -469,7 +469,7 @@ async function saveAsNote(m, idx) {
     session_id: null,
     query_log_id: m.queryLogId,
   })
-  ElMessage.success('已保存到工作区')
+  ElMessage.success('已保存到笔记')
 }
 
 onMounted(async () => {
@@ -848,7 +848,7 @@ watch(
   overflow: hidden;
 }
 
-/* ========== 移动端（<992px）：聊天区全宽，工作区/报告进抽屉 ========== */
+/* ========== 移动端（<992px）：聊天区全宽，笔记/报告进抽屉 ========== */
 @media (max-width: 991px) {
   .studio {
     /* 顶栏(52px)+简条+底部标签栏(~66px)+内边距 */
