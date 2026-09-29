@@ -64,12 +64,40 @@
           <el-form-item label="发送通道">
             <el-radio-group v-model="loginCfg.sms.provider">
               <el-radio value="log">仅记录日志（开发/内测）</el-radio>
+              <el-radio value="xinxinyun">欣欣云短信</el-radio>
               <el-radio value="http">通用 HTTP 网关</el-radio>
             </el-radio-group>
             <div class="hint" style="margin-left: 0; width: 100%">
-              log 通道不真实发短信，dev 环境验证码直接返回到登录页；阿里云/腾讯云通道为预留扩展位，确定平台后即可接入。
+              log 通道不真实发短信，dev 环境验证码直接返回到登录页；欣欣云按官方接口发送（密码加密存储、发送时 MD5）；其他供应商可用通用 HTTP 网关适配。
             </div>
           </el-form-item>
+          <template v-if="loginCfg.sms.provider === 'xinxinyun'">
+            <el-form-item label="sp_id">
+              <el-input v-model="loginCfg.sms.xinxinyun.sp_id" placeholder="产品 sp_id，如 352107" />
+            </el-form-item>
+            <el-form-item label="接口密码">
+              <el-input
+                v-model="loginCfg.sms.xinxinyun.password"
+                type="password" show-password
+                :placeholder="loginCfg.sms.xinxinyun.has_password ? `已保存（尾号 ${loginCfg.sms.xinxinyun.password_tail}），输入以更换` : '未设置'"
+              />
+              <div class="hint" style="margin-left: 0; width: 100%">加密存储、脱敏回显；留空表示不修改，发送时自动 MD5</div>
+            </el-form-item>
+            <el-form-item label="发送接口 URL">
+              <el-input v-model="loginCfg.sms.xinxinyun.url" placeholder="https://sms.shxinxinyun.com/api/send-sms-batch" />
+            </el-form-item>
+            <el-form-item label="短信签名">
+              <el-input v-model="loginCfg.sms.xinxinyun.sign" placeholder="【榜样知识库】（拼在内容最前）" />
+            </el-form-item>
+            <el-form-item label="内容模板">
+              <el-input
+                v-model="loginCfg.sms.xinxinyun.content_template"
+                type="textarea" :rows="2"
+                placeholder="验证码{code}，10 分钟内有效，请勿泄露给他人。"
+              />
+              <div class="hint" style="margin-left: 0; width: 100%">{code} 会被替换为实际验证码</div>
+            </el-form-item>
+          </template>
           <template v-if="loginCfg.sms.provider === 'http'">
             <el-form-item label="网关 URL">
               <el-input v-model="loginCfg.sms.http.url" placeholder="https://sms-provider.example.com/send" />
@@ -275,6 +303,15 @@ const loginCfg = reactive({
     enabled: false,
     provider: 'log',
     http: { url: '', body_template: '{"phone": "{phone}", "code": "{code}"}', headersText: '' },
+    xinxinyun: {
+      sp_id: '',
+      password: '',
+      has_password: false,
+      password_tail: '',
+      url: 'https://sms.shxinxinyun.com/api/send-sms-batch',
+      sign: '',
+      content_template: '验证码{code}，10 分钟内有效，请勿泄露给他人。',
+    },
   },
   wechat: { enabled: false, app_id: '', app_secret: '', has_app_secret: false, app_secret_tail: '', redirect_uri: '' },
 })
@@ -287,6 +324,14 @@ async function loadLoginCfg() {
     loginCfg.sms.http.url = res?.sms?.http?.url || ''
     loginCfg.sms.http.body_template = res?.sms?.http?.body_template || '{"phone": "{phone}", "code": "{code}"}'
     loginCfg.sms.http.headersText = res?.sms?.http?.headers ? JSON.stringify(res.sms.http.headers, null, 2) : ''
+    const x = res?.sms?.xinxinyun || {}
+    loginCfg.sms.xinxinyun.sp_id = x.sp_id || ''
+    loginCfg.sms.xinxinyun.url = x.url || 'https://sms.shxinxinyun.com/api/send-sms-batch'
+    loginCfg.sms.xinxinyun.sign = x.sign || ''
+    loginCfg.sms.xinxinyun.content_template = x.content_template || '验证码{code}，10 分钟内有效，请勿泄露给他人。'
+    loginCfg.sms.xinxinyun.has_password = !!x.has_password
+    loginCfg.sms.xinxinyun.password_tail = x.password_tail || ''
+    loginCfg.sms.xinxinyun.password = ''
     loginCfg.wechat.enabled = !!res?.wechat?.enabled
     loginCfg.wechat.app_id = res?.wechat?.app_id || ''
     loginCfg.wechat.has_app_secret = !!res?.wechat?.has_app_secret
@@ -308,11 +353,20 @@ async function saveLoginCfg() {
   }
   saving.value = true
   try {
+    const x = loginCfg.sms.xinxinyun
     const res = await updateLoginIntegrations({
       sms: {
         enabled: loginCfg.sms.enabled,
         provider: loginCfg.sms.provider,
         http: { url: loginCfg.sms.http.url, body_template: loginCfg.sms.http.body_template, headers },
+        xinxinyun: {
+          sp_id: x.sp_id,
+          // 未输入 = 保持原值（后端 null 语义）；输入后覆盖
+          password: x.password || null,
+          url: x.url,
+          sign: x.sign,
+          content_template: x.content_template,
+        },
       },
       wechat: {
         enabled: loginCfg.wechat.enabled,
@@ -322,6 +376,9 @@ async function saveLoginCfg() {
         redirect_uri: loginCfg.wechat.redirect_uri,
       },
     })
+    loginCfg.sms.xinxinyun.has_password = !!res?.sms?.xinxinyun?.has_password
+    loginCfg.sms.xinxinyun.password_tail = res?.sms?.xinxinyun?.password_tail || ''
+    loginCfg.sms.xinxinyun.password = ''
     loginCfg.wechat.has_app_secret = !!res?.wechat?.has_app_secret
     loginCfg.wechat.app_secret_tail = res?.wechat?.app_secret_tail || ''
     loginCfg.wechat.app_secret = ''

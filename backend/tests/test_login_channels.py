@@ -3,6 +3,7 @@
 覆盖：配置解析/脱敏/加密保持、验证码签发限流、验证码校验（过期/超次/一次性）、
 管理端 login-integrations 读写、短信登录未启用时端点 403。
 """
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -247,3 +248,137 @@ async def test_phone_login_403_when_disabled(client):
         "/api/v1/auth/login/phone", json={"phone": "13800138000", "code": "123456"}
     )
     assert resp.status_code == 403
+
+
+# ========== 欣欣云短信通道 ==========
+
+
+class _FakeSmsResp:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeSmsHttpClient:
+    """捕获 post 参数的假 httpx.AsyncClient（类属性 payload 控制返回）。"""
+
+    captured: dict = {}
+    payload: dict = {"code": 0, "msg": "success", "msg_id": "17"}
+
+    def __init__(self, timeout=None):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def post(self, url, data=None, headers=None, content=None):
+        _FakeSmsHttpClient.captured = {"url": url, "data": data, "headers": headers}
+        return _FakeSmsResp(type(self).payload)
+
+
+def _xinxinyun_cfg(password_plain="my-api-password"):
+    return {
+        "sp_id": "352107",
+        "password": lc.encrypt_sms_password(password_plain, ""),
+        "url": "https://sms.shxinxinyun.com/api/send-sms-batch",
+        "sign": "【测试签名】",
+        "content_template": "验证码{code}，10 分钟内有效。",
+    }
+
+
+def test_xinxinyun_defaults_and_mask():
+    cfg = lc.get_login_integrations_from_value(None)
+    x = cfg["sms"]["xinxinyun"]
+    assert x["url"] == "https://sms.shxinxinyun.com/api/send-sms-batch"
+    assert x["sp_id"] == ""
+    # 脱敏：不下发密文/明文，只给 has_password + 尾号
+    cfg["sms"]["xinxinyun"] = _xinxinyun_cfg()
+    masked = lc.mask_login_integrations(cfg)
+    xm = masked["sms"]["xinxinyun"]
+    assert "password" not in xm
+    assert xm["has_password"] is True
+    assert xm["password_tail"] == "word"
+    assert "my-api-password" not in json.dumps(masked)
+
+
+async def test_send_sms_xinxinyun_success(monkeypatch):
+    monkeypatch.setattr(lc.httpx, "AsyncClient", _FakeSmsHttpClient)
+    _FakeSmsHttpClient.payload = {"code": 0, "msg": "success", "msg_id": "17"}
+    result = await lc._send_sms(
+        {"provider": "xinxinyun", "xinxinyun": _xinxinyun_cfg()}, "13800138000", "123456"
+    )
+    assert result is None  # 非 log 通道不回 dev_code
+    req = _FakeSmsHttpClient.captured
+    assert req["url"] == "https://sms.shxinxinyun.com/api/send-sms-batch"
+    assert req["data"]["sp_id"] == "352107"
+    assert req["data"]["mobiles"] == "13800138000"
+    assert req["data"]["content"] == "【测试签名】验证码123456，10 分钟内有效。"
+    # 密码发送时 MD5（文档要求）
+    assert req["data"]["password"] == hashlib.md5(b"my-api-password").hexdigest()
+    # 供应商文档要求带 User-Agent
+    assert "User-Agent" in req["headers"]
+
+
+async def test_send_sms_xinxinyun_error_code_raises(monkeypatch):
+    monkeypatch.setattr(lc.httpx, "AsyncClient", _FakeSmsHttpClient)
+    _FakeSmsHttpClient.payload = {"code": 10011, "msg": "余额不足，请尽快充值"}
+    with pytest.raises(RuntimeError, match="余额不足"):
+        await lc._send_sms(
+            {"provider": "xinxinyun", "xinxinyun": _xinxinyun_cfg()}, "13800138000", "123456"
+        )
+
+
+async def test_send_sms_xinxinyun_missing_config_raises():
+    bad = _xinxinyun_cfg()
+    bad["sp_id"] = ""
+    with pytest.raises(RuntimeError, match="sp_id"):
+        await lc._send_sms({"provider": "xinxinyun", "xinxinyun": bad}, "13800138000", "123456")
+
+
+async def test_put_login_integrations_sms_password_semantics(client):
+    """短信接口密码：null 保持原值；响应脱敏且不下发明文。"""
+    db = _FakeSession()
+    _override(db)
+    old_cipher = lc.encrypt_sms_password("old-sms-pwd", "")
+    db.queue_get(
+        SystemSetting(
+            key=lc.LOGIN_INTEGRATIONS_KEY,
+            value=json.dumps({"sms": {"xinxinyun": {"password": old_cipher}}}),
+        )
+    )
+    resp = await client.put(
+        "/api/v1/admin/settings/login-integrations",
+        json={
+            "sms": {
+                "enabled": True,
+                "provider": "xinxinyun",
+                "http": {"url": "", "headers": {}, "body_template": "{}"},
+                "xinxinyun": {
+                    "sp_id": "352107",
+                    "password": None,  # 不修改
+                    "url": "https://sms.shxinxinyun.com/api/send-sms-batch",
+                    "sign": "【测试】",
+                    "content_template": "验证码{code}",
+                },
+            },
+            "wechat": {"enabled": False, "app_id": "", "app_secret": None, "redirect_uri": ""},
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    x = data["sms"]["xinxinyun"]
+    assert x["has_password"] is True
+    assert x["password_tail"] == "-pwd"
+    assert "old-sms-pwd" not in json.dumps(data)
+    # 保存落库的值仍是密文且对应原密码
+    saved = json.loads(db.added[0].value)
+    assert decrypt_secret(saved["sms"]["xinxinyun"]["password"]) == "old-sms-pwd"

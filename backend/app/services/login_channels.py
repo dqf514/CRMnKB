@@ -1,9 +1,9 @@
 """登录接入通道：短信验证码全流程 + 微信登录配置框架。
 
 配置存 system_settings（key=login_integrations），结构见 DEFAULT_CONFIG：
-- sms.provider = log（仅写日志，dev 环境把验证码带回响应）/ http（通用 HTTP 网关，
-  body_template 支持 {phone} {code} 占位，适配云片/聚合等简单接口）；aliyun/tencent
-  预留扩展位（选定平台后在 _send_sms 里加分支）。
+- sms.provider = log（仅写日志，dev 环境把验证码带回响应）/ xinxinyun（欣欣云短信
+  接口：sp_id + 接口密码（加密存储、发送时 MD5）+ 可改发送地址）/ http（通用 HTTP
+  网关，body_template 支持 {phone} {code} 占位，适配云片/聚合等简单接口）。
 - wechat 仅保存 app_id/app_secret（加密存储）/redirect_uri，登录流程后续接入。
 
 安全口径：验证码只存 sha256 哈希（带 JWT_SECRET 盐），10 分钟有效、最多试 5 次、
@@ -31,12 +31,22 @@ LOGIN_INTEGRATIONS_KEY = "login_integrations"
 DEFAULT_CONFIG: dict = {
     "sms": {
         "enabled": False,
-        # log = 仅写日志（开发用）；http = 通用 HTTP 网关；aliyun/tencent 预留
+        # log = 仅写日志（开发用）；xinxinyun = 欣欣云短信接口；http = 通用 HTTP 网关
         "provider": "log",
         "http": {
             "url": "",
             "headers": {},
             "body_template": '{"phone": "{phone}", "code": "{code}"}',
+        },
+        # 欣欣云（https://shxinxinyun.com/api.html）：POST form-urlencoded，
+        # password 发送时 MD5；password 密文存储、接口脱敏回显
+        "xinxinyun": {
+            "sp_id": "",
+            "password": "",
+            "url": "https://sms.shxinxinyun.com/api/send-sms-batch",
+            # 短信签名（如【榜样知识库】），拼在内容最前面
+            "sign": "",
+            "content_template": "验证码{code}，10 分钟内有效，请勿泄露给他人。",
         },
     },
     "wechat": {
@@ -103,13 +113,18 @@ async def save_login_integrations(db: AsyncSession, cfg: dict) -> None:
 
 
 def mask_login_integrations(cfg: dict) -> dict:
-    """接口返回用：app_secret 脱敏（has_app_secret + 后 4 位），不下发明文/密文。"""
+    """接口返回用：wechat.app_secret / sms.xinxinyun.password 脱敏（has_* + 后 4 位），不下发明文/密文。"""
     masked = json.loads(json.dumps(cfg, ensure_ascii=False))
     secret = decrypt_secret(cfg.get("wechat", {}).get("app_secret") or "") or ""
     w = masked.setdefault("wechat", {})
     w.pop("app_secret", None)
     w["has_app_secret"] = bool(secret)
     w["app_secret_tail"] = secret[-4:] if secret else ""
+    sms_pwd = decrypt_secret((cfg.get("sms", {}).get("xinxinyun") or {}).get("password") or "") or ""
+    x = masked.setdefault("sms", {}).setdefault("xinxinyun", {})
+    x.pop("password", None)
+    x["has_password"] = bool(sms_pwd)
+    x["password_tail"] = sms_pwd[-4:] if sms_pwd else ""
     return masked
 
 
@@ -122,6 +137,10 @@ def encrypt_wechat_secret(new_plain: str | None, old_cipher: str) -> str:
     return encrypt_secret(new_plain) or ""
 
 
+# 短信接口密码与 app_secret 同一套语义
+encrypt_sms_password = encrypt_wechat_secret
+
+
 async def sms_login_enabled(db: AsyncSession) -> bool:
     """短信登录是否启用（brand 公开接口下发给登录页）。"""
     cfg = await get_login_integrations(db)
@@ -131,6 +150,9 @@ async def sms_login_enabled(db: AsyncSession) -> bool:
 async def _send_sms(cfg: dict, phone: str, code: str) -> str | None:
     """按配置通道发送验证码；返回 dev_code（仅 log 通道 + dev 环境）。"""
     provider = (cfg.get("provider") or "log").lower()
+    if provider == "xinxinyun":
+        await _send_sms_xinxinyun(cfg.get("xinxinyun") or {}, phone, code)
+        return None
     if provider == "http":
         http_cfg = cfg.get("http") or {}
         url = (http_cfg.get("url") or "").strip()
@@ -146,6 +168,39 @@ async def _send_sms(cfg: dict, phone: str, code: str) -> str | None:
     # log 通道：写日志；dev 环境直接把验证码带回响应（前端自动填充，免查日志）
     logger.warning("[login-code] %s 的登录验证码：%s（log 通道，未真实发送）", phone, code)
     return code if settings.ENV.lower() in ("dev", "development", "test") else None
+
+
+async def _send_sms_xinxinyun(xcfg: dict, phone: str, code: str) -> None:
+    """欣欣云短信接口（https://shxinxinyun.com/api.html）：
+
+    POST form-urlencoded：sp_id / mobiles / content / password(发送时 MD5)。
+    返回 JSON：code=0 为成功，其余抛错（msg 为供应商原始错误提示）。
+    """
+    sp_id = (xcfg.get("sp_id") or "").strip()
+    url = (xcfg.get("url") or "").strip()
+    plain_pwd = decrypt_secret(xcfg.get("password") or "") or ""
+    if not sp_id or not url:
+        raise RuntimeError("欣欣云短信未配置 sp_id / 接口地址（管理端「系统设置 → 登录与接入」）")
+    sign = (xcfg.get("sign") or "").strip()
+    template = (xcfg.get("content_template") or "").strip() or "验证码{code}，10 分钟内有效。"
+    content = sign + template.replace("{code}", code)
+    form: dict[str, str] = {"sp_id": sp_id, "mobiles": phone, "content": content}
+    if plain_pwd:
+        form["password"] = hashlib.md5(plain_pwd.encode("utf-8")).hexdigest()
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            url,
+            data=form,
+            # 供应商文档要求：请求必须带 User-Agent，否则 403/404
+            headers={"User-Agent": "application/x-www-form-urlencoded"},
+        )
+        resp.raise_for_status()
+        try:
+            result = resp.json()
+        except ValueError:
+            raise RuntimeError(f"短信网关返回非 JSON（HTTP {resp.status_code}）") from None
+    if result.get("code") != 0:
+        raise RuntimeError(f"短信发送被拒：{result.get('msg') or result.get('code')}")
 
 
 async def issue_login_code(db: AsyncSession, phone: str, ip: str | None) -> str | None:

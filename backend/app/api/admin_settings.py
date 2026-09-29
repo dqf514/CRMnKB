@@ -30,6 +30,7 @@ from app.services.ingestion import (
     set_enabled_parse_exts,
 )
 from app.services.login_channels import (
+    encrypt_sms_password,
     encrypt_wechat_secret,
     get_login_integrations,
     mask_login_integrations,
@@ -81,10 +82,22 @@ class SmsHttpConfig(BaseModel):
     body_template: str = '{"phone": "{phone}", "code": "{code}"}'
 
 
+class SmsXinxinyunConfig(BaseModel):
+    """欣欣云短信接口（https://shxinxinyun.com/api.html）。"""
+
+    sp_id: str = ""
+    # None=不修改；""=清除；其余按明文加密存储（发送时 MD5）
+    password: str | None = None
+    url: str = "https://sms.shxinxinyun.com/api/send-sms-batch"
+    sign: str = ""
+    content_template: str = "验证码{code}，10 分钟内有效，请勿泄露给他人。"
+
+
 class SmsIntegrationConfig(BaseModel):
     enabled: bool = False
-    provider: str = Field(default="log", pattern="^(log|http)$")  # aliyun/tencent 预留扩展位
+    provider: str = Field(default="log", pattern="^(log|http|xinxinyun)$")
     http: SmsHttpConfig = Field(default_factory=SmsHttpConfig)
+    xinxinyun: SmsXinxinyunConfig = Field(default_factory=SmsXinxinyunConfig)
 
 
 class WechatIntegrationConfig(BaseModel):
@@ -116,10 +129,16 @@ async def update_login_integrations(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    """保存登录接入配置。app_secret 传 null 保持原值、传空串清除、其余按明文加密。"""
+    """保存登录接入配置。app_secret / 短信接口密码传 null 保持原值、传空串清除、其余按明文加密。"""
     current = await get_login_integrations(db)
+    sms = body.sms.model_dump()
+    # 接口密码走加密存储（与 app_secret 同一套语义），dump 出来的明文在此转换
+    sms["xinxinyun"]["password"] = encrypt_sms_password(
+        body.sms.xinxinyun.password,
+        (current.get("sms", {}).get("xinxinyun") or {}).get("password") or "",
+    )
     cfg = {
-        "sms": body.sms.model_dump(),
+        "sms": sms,
         "wechat": {
             "enabled": body.wechat.enabled,
             "app_id": body.wechat.app_id.strip(),
