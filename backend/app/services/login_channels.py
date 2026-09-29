@@ -39,7 +39,7 @@ DEFAULT_CONFIG: dict = {
             "body_template": '{"phone": "{phone}", "code": "{code}"}',
         },
         # 欣欣云（https://shxinxinyun.com/api.html）：POST form-urlencoded，
-        # password 发送时 MD5；password 密文存储、接口脱敏回显
+        # password 原样发送；password 密文存储、接口脱敏回显
         "xinxinyun": {
             "sp_id": "",
             "password": "",
@@ -173,7 +173,7 @@ async def _send_sms(cfg: dict, phone: str, code: str) -> str | None:
 async def _send_sms_xinxinyun(xcfg: dict, phone: str, code: str) -> None:
     """欣欣云短信接口（https://shxinxinyun.com/api.html）：
 
-    POST form-urlencoded：sp_id / mobiles / content / password(发送时 MD5)。
+    POST form-urlencoded：sp_id / mobiles / content / password（原样发送）。
     返回 JSON：code=0 为成功，其余抛错（msg 为供应商原始错误提示）。
     """
     sp_id = (xcfg.get("sp_id") or "").strip()
@@ -186,7 +186,7 @@ async def _send_sms_xinxinyun(xcfg: dict, phone: str, code: str) -> None:
     content = sign + template.replace("{code}", code)
     form: dict[str, str] = {"sp_id": sp_id, "mobiles": phone, "content": content}
     if plain_pwd:
-        form["password"] = hashlib.md5(plain_pwd.encode("utf-8")).hexdigest()
+        form["password"] = plain_pwd
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
             url,
