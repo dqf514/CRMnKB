@@ -200,7 +200,7 @@ async def associate_to_kb(
     user: User = Depends(get_current_user),
 ):
     await _get_kb_or_404(db, user, kb_id, "edit")
-    result = await associate_files(db, user.tenant_id, kb_id, body.file_ids)
+    result = await associate_files(db, user.tenant_id, kb_id, body.file_ids, user)
     await db.commit()
     for doc_id in result["parse_doc_ids"]:
         background_tasks.add_task(process_document, doc_id)

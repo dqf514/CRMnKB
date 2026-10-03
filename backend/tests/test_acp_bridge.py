@@ -1,6 +1,8 @@
 """dsh ACP 桥接测试：进程生命周期（monkeypatch spawn_agent_process 假连接）
 + 进程级 patch yml 生成 + 会话激活（new/resume）+ 事件转发 + 权限应答策略。
 不起真实 dsh 进程。"""
+import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -209,6 +211,35 @@ async def test_crash_self_heal_rebuilds_process(fake_acp, monkeypatch):
     assert fake_acp.conns[1].resume_calls == ["sess-x"]
 
 
+async def test_resume_rebuilds_process_when_mcp_token_stale(fake_acp, monkeypatch):
+    """长会话 MCP 令牌临期：已活动会话 resume 时重建进程并重新挂载（新签令牌）。"""
+    bridge = AcpBridge()
+    monkeypatch.setattr(AcpBridge, "_resolve_chat_model", _fake_model_cfg)
+    await bridge.resume_session(_user(1), "sess-x")
+    assert len(fake_acp.calls) == 1
+    # 模拟挂载时间已超过 TTL（默认 7 天）→ 临期
+    bridge._mount_times["sess-x"] = time.monotonic() - 8 * 24 * 3600
+    await bridge.resume_session(_user(1), "sess-x")
+    assert fake_acp.cms[0].exited  # 旧进程被关闭
+    assert len(fake_acp.calls) == 2  # 进程重建
+    assert fake_acp.conns[1].resume_calls == ["sess-x"]  # 新进程上重新 resume（重新挂 MCP）
+    assert "sess-x" in bridge._active_sessions
+    # 新挂载时间被刷新，短时间内不再触发重建
+    await bridge.resume_session(_user(1), "sess-x")
+    assert len(fake_acp.calls) == 2
+    assert fake_acp.conns[1].resume_calls == ["sess-x"]
+
+
+async def test_resume_fresh_mount_no_rebuild(fake_acp, monkeypatch):
+    """令牌未临期：已活动会话直接返回，不重建不重复 resume。"""
+    bridge = AcpBridge()
+    monkeypatch.setattr(AcpBridge, "_resolve_chat_model", _fake_model_cfg)
+    await bridge.resume_session(_user(1), "sess-x")
+    await bridge.resume_session(_user(1), "sess-x")
+    assert len(fake_acp.calls) == 1
+    assert fake_acp.conns[0].resume_calls == ["sess-x"]
+
+
 async def test_close_all(fake_acp, monkeypatch):
     bridge = AcpBridge()
     monkeypatch.setattr(AcpBridge, "_resolve_chat_model", _fake_model_cfg)
@@ -276,6 +307,42 @@ async def test_permission_kb_tools_auto_allowed():
     )
     assert resp.outcome.outcome == "selected"
     assert resp.outcome.option_id == "allow-once"
+
+
+async def test_permission_readonly_whitelist_all_allowed():
+    """只读白名单内的工具全部自动放行。"""
+    handler = acp_bridge._ClientHandler()
+    for tool in (
+        "kb_search", "kb_read_doc", "kb_list",
+        "crm_list_customers", "crm_search_customers", "crm_get_customer",
+        "crm_list_followups", "crm_list_opportunities", "crm_list_tasks",
+        "crm_stats", "skill_list",
+        "memory_save", "memory_list", "memory_search", "memory_delete",
+    ):
+        resp = await handler.request_permission(
+            "s", SimpleNamespace(title=f"mcp__kb__{tool}"), _options()
+        )
+        assert resp.outcome.option_id == "allow-once", tool
+
+
+async def test_permission_side_effect_tools_rejected():
+    """写工具 / skill_call / web_search / web_fetch 即使在 mcp__kb__ 前缀下也不放行。"""
+    handler = acp_bridge._ClientHandler()
+    for title in (
+        "mcp__kb__crm_create_customer",
+        "mcp__kb__crm_update_customer",
+        "mcp__kb__crm_delete_customer",
+        "mcp__kb__crm_create_opportunity",
+        "mcp__kb__crm_create_task",
+        "mcp__kb__crm_add_followup",
+        "mcp__kb__mail_draft_create",
+        "mcp__kb__skill_create_api",
+        "mcp__kb__skill_call",
+        "mcp__kb__web_search",
+        "mcp__kb__web_fetch",
+    ):
+        resp = await handler.request_permission("s", SimpleNamespace(title=title), _options())
+        assert resp.outcome.option_id == "reject-once", title
 
 
 async def test_permission_other_tools_rejected():
@@ -372,3 +439,76 @@ async def test_unavailable_when_acp_missing(monkeypatch):
     assert not bridge.available
     with pytest.raises(AcpUnavailable):
         await bridge._get_conn(1)
+
+
+# ---------------------------------------------------------------------------
+# 并发与超时：会话锁串行化 prompt、spawn 超时回收
+# ---------------------------------------------------------------------------
+
+
+async def test_run_turn_serializes_concurrent_prompts(fake_acp, monkeypatch):
+    """同一会话并发 run_turn：第二个 prompt 必须等第一个结束才开始（会话锁串行化）。"""
+    bridge = AcpBridge()
+    monkeypatch.setattr(AcpBridge, "_resolve_chat_model", _fake_model_cfg)
+    sid = await bridge.new_session(_user(1))
+    conn = fake_acp.conns[0]
+    started: list[str] = []
+    gate = asyncio.Event()
+    orig_prompt = conn.prompt
+
+    async def _gated_prompt(session_id, prompt, **kw):
+        started.append(getattr(prompt[0], "text", str(prompt)))
+        if len(started) == 1:
+            await gate.wait()  # 第一个 prompt 挂住，模拟长轮
+        return await orig_prompt(session_id, prompt, **kw)
+
+    conn.prompt = _gated_prompt
+
+    async def _consume(q):
+        return [i async for i in bridge.run_turn(_user(1), sid, q)]
+
+    t1 = asyncio.create_task(_consume("第一问"))
+    await asyncio.sleep(0.1)  # 等第一个 prompt 进入并被挂住
+    t2 = asyncio.create_task(_consume("第二问"))
+    await asyncio.sleep(0.3)
+    assert started == ["第一问"]  # 第二个 prompt 被会话锁挡住，未并发进入
+    gate.set()
+    r1, r2 = await asyncio.gather(t1, t2)
+    assert started == ["第一问", "第二问"]
+    assert r1[-1]["kind"] == "done" and r2[-1]["kind"] == "done"
+
+
+async def test_resume_session_concurrent_only_once(fake_acp, monkeypatch):
+    """并发 resume 同一会话：会话锁兜底，只真正 resume 一次。"""
+    bridge = AcpBridge()
+    monkeypatch.setattr(AcpBridge, "_resolve_chat_model", _fake_model_cfg)
+    await asyncio.gather(
+        bridge.resume_session(_user(1), "sess-x"),
+        bridge.resume_session(_user(1), "sess-x"),
+        bridge.resume_session(_user(1), "sess-x"),
+    )
+    assert fake_acp.conns[0].resume_calls == ["sess-x"]
+
+
+async def test_spawn_timeout_recovers_half_started_process(fake_acp, monkeypatch):
+    """spawn/initialize 挂起：超时后报错并尽力回收半启动进程，连接状态不留半成品。"""
+    monkeypatch.setattr(acp_bridge, "_SPAWN_TIMEOUT_SECONDS", 0.05)
+
+    class _HangCM:
+        def __init__(self):
+            self.exited = False
+
+        async def __aenter__(self):
+            await asyncio.sleep(3600)
+
+        async def __aexit__(self, *args):
+            self.exited = True
+
+    hang_cm = _HangCM()
+    monkeypatch.setattr(fake_acp, "spawn_agent_process", lambda *a, **kw: hang_cm)
+    bridge = AcpBridge()
+    monkeypatch.setattr(AcpBridge, "_resolve_chat_model", _fake_model_cfg)
+    with pytest.raises(asyncio.TimeoutError):
+        await bridge.new_session(_user(1))
+    assert hang_cm.exited  # 半启动进程被回收
+    assert bridge._conn is None

@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
@@ -516,6 +516,7 @@ def _build_chunks(
         cur_len = 0
 
         def emit() -> None:
+            nonlocal cur_len
             if not cur:
                 return
             text_body = "\n\n".join(cur)
@@ -956,7 +957,8 @@ async def _persist_parsed_document(
 ) -> None:
     """把解析出的文本写入文档：清洗→切片→批量 embed→写 chunks→更新状态/元数据（含版本快照）。
 
-    process_document 与 vision_review_document 共用；旧切片由调用方先清理。
+    process_document 与 vision_review_document 共用；旧切片的清理由调用方负责
+    （process_document 先删后写，vision_review_document 先写新切片再按 id 删旧切片）。
     失败抛异常，由调用方统一处理状态。"""
     text = clean_text(raw)
     chunks = chunk_text(text, settings.CHUNK_SIZE, settings.CHUNK_OVERLAP)
@@ -1063,50 +1065,100 @@ async def _persist_parsed_document(
     doc.doc_metadata = meta
 
 
+# 解析互斥租约：存 doc_metadata["processing_lease"]（ISO 时间戳）。
+# 进入 process_document 时用条件 UPDATE 抢占；租约带时限，进程崩溃残留的超时后可再抢占
+# （启动恢复 requeue 的兜底），不会因残留租约永久卡死。
+_PARSE_LEASE_KEY = "processing_lease"
+_PARSE_LEASE_SECONDS = 3600
+
+
+async def _acquire_parse_lease(session, doc_id: int) -> bool:
+    """条件 UPDATE 抢占解析租约：仅当无租约或租约已过期时成功。成功即提交，对其他连接可见。"""
+    now = datetime.now(timezone.utc)
+    res = await session.execute(
+        sql_text(
+            "UPDATE knowledge_documents "
+            "SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(:k, :ts) "
+            "WHERE id = :id "
+            "AND (metadata->>:k IS NULL OR (metadata->>:k)::timestamptz < :stale)"
+        ),
+        {
+            "k": _PARSE_LEASE_KEY,
+            "ts": now.isoformat(),
+            "id": doc_id,
+            "stale": (now - timedelta(seconds=_PARSE_LEASE_SECONDS)).isoformat(),
+        },
+    )
+    await session.commit()
+    return (res.rowcount or 0) > 0
+
+
+async def _release_parse_lease(session, doc_id: int) -> None:
+    """释放解析租约（移除 metadata 键）。"""
+    await session.execute(
+        sql_text("UPDATE knowledge_documents SET metadata = metadata - :k WHERE id = :id"),
+        {"k": _PARSE_LEASE_KEY, "id": doc_id},
+    )
+    await session.commit()
+
+
 async def process_document(doc_id: int) -> None:
     """读文件→（多模态）解析出文本→清洗→切片（v2 标题锚定）→批量 embed→写 chunks→更新文档状态。
     任何失败只把文档标记为 failed，绝不抛出。"""
     async with AsyncSessionLocal() as session:
-        doc = await session.get(KnowledgeDocument, doc_id)
-        if doc is None:
-            logger.warning("process_document: 文档 %s 不存在", doc_id)
-            return
-        # PST 归档：委托给流式拆解管线（逐封邮件拆成独立文档再各自走本管线）
-        if (doc.file_type or "").lower() == "pst":
-            from app.services.pst import process_pst
-
-            await process_pst(doc_id)
+        # 并发互斥：上传/重试/同步/启动恢复等多入口可能同时对同一文档排队重解析，
+        # 用 DB 级租约（条件 UPDATE）抢占，抢不到说明同文档正在解析，直接跳过，
+        # 避免两个解析任务交错清/写切片导致重复或覆盖。
+        if not await _acquire_parse_lease(session, doc_id):
+            logger.info("文档 %s 正在解析中（租约被占用），跳过本次重复调度", doc_id)
             return
         try:
-            # 幂等重解析：先清旧切片并立即提交。
-            # 关键：不能把 DELETE 与后面耗时的 LLM 调用放同一事务——否则 LLM 一慢，
-            # 事务就长期持有 document_chunks 的锁（会堵死 REINDEX CONCURRENTLY 等维护）。
-            await session.execute(
-                delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
-            )
-            await session.commit()
-            raw, method, model = await _extract_text(doc)
-            await _persist_parsed_document(session, doc, raw, method, model)
-        except Exception as exc:
-            logger.exception("文档 %s 处理失败", doc_id)
-            msg = str(exc) or repr(exc)  # 部分异常 str 为空（如裸 PdfReadError），兜底 repr
-            doc.status = "failed"
-            doc.content = f"[处理失败] {msg}"
-            meta = dict(doc.doc_metadata or {})
-            meta["error"] = msg
-            doc.doc_metadata = meta
-            from app.services.error_log import log_error
+            doc = await session.get(KnowledgeDocument, doc_id)
+            if doc is None:
+                logger.warning("process_document: 文档 %s 不存在", doc_id)
+                return
+            # PST 归档：委托给流式拆解管线（逐封邮件拆成独立文档再各自走本管线）
+            if (doc.file_type or "").lower() == "pst":
+                from app.services.pst import process_pst
 
-            await log_error("error", "ingestion", f"文档 {doc_id} 处理失败", msg, tenant_id=doc.tenant_id)
-        await session.commit()
+                await process_pst(doc_id)
+                return
+            try:
+                # 幂等重解析：先清旧切片并立即提交。
+                # 关键：不能把 DELETE 与后面耗时的 LLM 调用放同一事务——否则 LLM 一慢，
+                # 事务就长期持有 document_chunks 的锁（会堵死 REINDEX CONCURRENTLY 等维护）。
+                await session.execute(
+                    delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
+                )
+                await session.commit()
+                raw, method, model = await _extract_text(doc)
+                await _persist_parsed_document(session, doc, raw, method, model)
+            except Exception as exc:
+                logger.exception("文档 %s 处理失败", doc_id)
+                msg = str(exc) or repr(exc)  # 部分异常 str 为空（如裸 PdfReadError），兜底 repr
+                doc.status = "failed"
+                doc.content = f"[处理失败] {msg}"
+                meta = dict(doc.doc_metadata or {})
+                meta["error"] = msg
+                doc.doc_metadata = meta
+                from app.services.error_log import log_error
+
+                await log_error("error", "ingestion", f"文档 {doc_id} 处理失败", msg, tenant_id=doc.tenant_id)
+            await session.commit()
+        finally:
+            # 释放租约；释放失败不致命（租约带时限，超时后自然可被再抢占）
+            try:
+                await _release_parse_lease(session, doc_id)
+            except Exception:
+                logger.warning("文档 %s 解析租约释放失败（将靠超时自动过期）", doc_id)
 
 
 async def vision_review_document(doc_id: int) -> None:
     """视觉复核：对本地 OCR 识别质量差的图片/扫描 PDF，用视觉模型重新转录并更新切片。
 
     仅允许 status=ready 且属于视觉可识别（图片/扫描 PDF 的结果方法）的文档；
-    视觉识别成功前不清旧切片，失败时保留旧内容可读（只记 vision_review_error 元数据），
-    绝不把文档打成 failed。可反复复核。"""
+    新切片写入成功后才删旧切片（同一事务提交），失败时保留旧内容可读
+    （只记 vision_review_error 元数据），绝不把文档打成 failed。可反复复核。"""
     async with AsyncSessionLocal() as session:
         doc = await session.get(KnowledgeDocument, doc_id)
         if doc is None:
@@ -1118,19 +1170,31 @@ async def vision_review_document(doc_id: int) -> None:
                 raise ValueError("仅就绪文档可视觉复核")
             if cur_method not in ("ocr", "image_describe", "vision_ocr"):
                 raise ValueError("仅图片/扫描 PDF（视觉可识别）文档可视觉复核")
-            # 先做耗时的视觉提取（成功后再清旧切片，失败保留旧内容）
+            # 先做耗时的视觉提取（成功后才动切片，失败保留旧内容）
             raw, method, model = await _extract_text(doc, force_vision=True)
-            await session.execute(
-                delete(DocumentChunk).where(DocumentChunk.document_id == doc.id)
-            )
-            await session.commit()
+            # 先写新切片、后删旧切片，且与最终 commit 同事务：
+            # 写新切片中途失败整体回滚，任何失败路径下旧切片都仍在可读。
+            old_chunk_ids = (
+                await session.execute(
+                    select(DocumentChunk.id).where(
+                        DocumentChunk.document_id == doc.id
+                    )
+                )
+            ).scalars().all()
             await _persist_parsed_document(session, doc, raw, method, model)
+            if old_chunk_ids:
+                await session.execute(
+                    delete(DocumentChunk).where(DocumentChunk.id.in_(old_chunk_ids))
+                )
             meta = dict(doc.doc_metadata or {})
             meta["vision_reviewed_at"] = datetime.now(timezone.utc).isoformat()
             meta.pop("vision_review_error", None)
             doc.doc_metadata = meta
             logger.info("文档 %s 视觉复核完成（%s，%s 个切片）", doc_id, method, doc.chunk_count)
         except Exception as exc:
+            # 失败可能发生在写新切片中途（已 flush 未 commit）：回滚整个事务，
+            # 旧切片不受影响，再把错误元数据单独提交。
+            await session.rollback()
             logger.warning("文档 %s 视觉复核失败（保留旧内容）: %s", doc_id, exc)
             meta = dict(doc.doc_metadata or {})
             meta["vision_review_error"] = str(exc)[:300]

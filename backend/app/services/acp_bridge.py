@@ -10,8 +10,9 @@
 - 会话可跨进程恢复：session/resume + PG 会话持久化插件（dsh_session_* 两表），
   后端重启/进程崩溃后 agent 上下文不丢（阶段 1 的 SDK 不支持跨进程恢复）。
 - 权限应答：dsh 审批链经 session/request_permission 反向请求客户端——
-  mcp__kb__ 前缀（知识库只读工具）自动 allow-once，其余一律拒绝
-  （写操作本就走后端 agent_approvals 审批链，不经 dsh 执行）。
+  mcp__kb__ 前缀下的只读白名单工具自动 allow-once，其余一律拒绝
+  （写工具/skill_call/web_search/web_fetch 不放行；写操作本就走后端
+  agent_approvals 审批链，不经 dsh 执行）。
 
 模型路由：进程级静态 patch（patches/acp-model.yml，进程启动时按 DB 默认 chat
 模型重写）注册 llm-pi-ai 的 kbcrm 路由（openai-completions，baseURL/apiKeyEnv
@@ -27,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from contextlib import suppress
 from pathlib import Path
 
 from sqlalchemy import select
@@ -60,14 +63,32 @@ class AcpUnavailable(Exception):
     """dsh ACP 运行环境不可用（agent-client-protocol 未安装、DSH_BIN 未配置等）。"""
 
 
+# dsh 子进程 spawn + initialize 的超时（秒）：_get_conn 在全局锁内启动进程，
+# 无超时的挂起会堵死所有 agent 请求
+_SPAWN_TIMEOUT_SECONDS = 60
+
+# session/request_permission 自动放行的只读工具白名单（mcp__kb__ 前缀下的具体工具名）。
+# 写工具（crm_create/update/delete 等）、skill_call（通用派发，有副作用）、
+# web_search/web_fetch（外发请求）不在列，一律走拒绝策略（写操作本就走后端
+# agent_approvals 审批链，不经 dsh 执行）。
+_AUTO_ALLOW_TOOLS = {
+    "kb_search", "kb_read_doc", "kb_list",
+    "crm_list_customers", "crm_search_customers", "crm_get_customer",
+    "crm_list_followups", "crm_list_opportunities", "crm_list_tasks", "crm_stats",
+    "skill_list",
+    "memory_save", "memory_list", "memory_search", "memory_delete",
+}
+
+
 class _ClientHandler:
     """ACP client 回调集合。
 
     - session_update：按 session_id 分发到 run_turn 注册的订阅队列
       （pydantic 模型转 snake_case dict 后投递）。
-    - request_permission：dsh 审批链的反向请求。mcp__kb__ 前缀（知识库
-      只读工具）自动 allow-once；其余一律拒绝并记日志——写操作走后端
-      agent_approvals 审批链，不允许 dsh 直接执行。
+    - request_permission：dsh 审批链的反向请求。mcp__kb__ 前缀下的只读
+      白名单工具自动 allow-once；其余（含写工具/skill_call/web_search/
+      web_fetch）一律拒绝并记日志——写操作走后端 agent_approvals 审批链，
+      不允许 dsh 直接执行。
     - fs/terminal 等 client 能力未声明（initialize 时 capabilities 全默认关），
       dsh 不会发起对应反向请求。
     """
@@ -98,16 +119,17 @@ class _ClientHandler:
 
     async def request_permission(self, session_id: str, tool_call, options, **kwargs) -> "RequestPermissionResponse":
         title = getattr(tool_call, "title", "") or ""
-        if title.startswith("mcp__kb__"):
+        prefix = "mcp__kb__"
+        if title.startswith(prefix) and title[len(prefix):] in _AUTO_ALLOW_TOOLS:
             option_id = next(
                 (o.option_id for o in options if o.option_id == "allow-once"),
                 options[0].option_id if options else "allow-once",
             )
-            logger.info("dsh 权限应答：自动允许知识库只读工具 %s", title)
+            logger.info("dsh 权限应答：自动允许只读工具 %s", title)
             return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=option_id))
         # 其余一律拒绝：优先 reject-once，没有该选项则取消（dsh 侧映射为 rejected/cancelled）
         reject_id = next((o.option_id for o in options if o.option_id == "reject-once"), None)
-        logger.warning("dsh 权限应答：拒绝工具 %s（仅放行 mcp__kb__ 只读工具）", title)
+        logger.warning("dsh 权限应答：拒绝工具 %s（仅放行只读白名单工具）", title)
         if reject_id is not None:
             return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=reject_id))
         return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
@@ -124,7 +146,21 @@ class AcpBridge:
         # 当前进程内已激活（session/new 或 resume 成功）的会话；
         # 进程重建时清空（dsh 不允许 resume 内存中已活动的会话）
         self._active_sessions: set[str] = set()
+        # 各会话最近一次挂载知识库 MCP（新签 dsh-mcp 令牌）的时间（monotonic）。
+        # 长会话令牌会过期（dsh 侧持有挂载时的旧令牌，MCP 请求 401），
+        # resume 时据此判断是否需要重建进程换新令牌
+        self._mount_times: dict[str, float] = {}
         self._lock = asyncio.Lock()
+        # 每会话一把锁：串行化同一会话的 resume/prompt——并发 prompt 会串帧重复落库，
+        # 并发 resume 会丢上下文（两个协程同时通过"未活动"检查重复 resume）
+        self._session_locks: dict[str, asyncio.Lock] = {}
+
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     @property
     def available(self) -> bool:
@@ -287,11 +323,21 @@ class AcpBridge:
             cm = acp.spawn_agent_process(
                 self._handler, settings.DSH_BIN, *args, env=env, cwd=str(self._workspace())
             )
-            conn, proc = await cm.__aenter__()
-            await conn.initialize(
-                protocol_version=acp.PROTOCOL_VERSION,
-                client_capabilities=ClientCapabilities(),
-            )
+            try:
+                # spawn + initialize 加超时：锁内挂起会堵死所有 agent 请求
+                conn, proc = await asyncio.wait_for(cm.__aenter__(), timeout=_SPAWN_TIMEOUT_SECONDS)
+                await asyncio.wait_for(
+                    conn.initialize(
+                        protocol_version=acp.PROTOCOL_VERSION,
+                        client_capabilities=ClientCapabilities(),
+                    ),
+                    timeout=_SPAWN_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                # 启动失败/超时：尽力回收半启动的子进程，避免残留
+                with suppress(Exception):
+                    await cm.__aexit__(None, None, None)
+                raise
             self._cm, self._conn, self._proc = cm, conn, proc
             logger.info("dsh ACP 进程已启动（pid=%s，模型 %s）", proc.pid, model_name)
             return conn
@@ -302,11 +348,13 @@ class AcpBridge:
             logger.warning("dsh ACP 进程已退出（rc=%s），下次请求自动重建", self._proc.returncode)
             self._cm = self._conn = self._proc = None
             self._active_sessions.clear()
+            self._mount_times.clear()
 
     async def _close_locked(self) -> None:
         cm = self._cm
         self._cm = self._conn = self._proc = None
         self._active_sessions.clear()
+        self._mount_times.clear()
         if cm is not None:
             try:
                 # 退出异步上下文：关闭 stdin（EOF），dsh 收到后有界退出
@@ -330,7 +378,20 @@ class AcpBridge:
             cwd=str(self._workspace()), mcp_servers=[self._kb_mcp_server(user)]
         )
         self._active_sessions.add(resp.session_id)
+        self._mount_times[resp.session_id] = time.monotonic()
         return resp.session_id
+
+    def _mount_token_stale(self, session_id: str) -> bool:
+        """判断会话挂载的 MCP 令牌是否临期（距过期不足余量即视为临期）。
+
+        余量取 30 分钟与 TTL 的 10% 的较小值；无挂载记录（老进程遗留）不强制重建。
+        """
+        mounted_at = self._mount_times.get(session_id)
+        if mounted_at is None:
+            return False
+        ttl = settings.DSH_MCP_TOKEN_EXPIRE_MINUTES * 60
+        margin = min(1800, ttl * 0.1)
+        return (time.monotonic() - mounted_at) > ttl - margin
 
     async def resume_session(self, user: User, session_id: str) -> None:
         """恢复既有 dsh 会话（跨进程：事件历史由 PG 持久化插件提供）。
@@ -339,16 +400,30 @@ class AcpBridge:
         会话不存在或 cwd 不匹配时由 dsh 抛错，调用方负责退回 new_session。
         注意必须先 _get_conn：进程若已崩溃，_get_conn 重建时会清空活动集，
         先查活动集会错过重建。
+
+        令牌临期：长会话的 dsh-mcp 令牌会过期（dsh 持有挂载时的旧令牌，MCP
+        请求 401 且 dsh 不允许对已活动会话重复 resume 换新令牌），此时重建
+        进程再 resume——会话历史在 PG 不丢，MCP 重新挂载并新签令牌。
+
+        并发 resume 同一会话经会话锁串行化：避免两个协程同时通过"未活动"
+        检查而重复 resume（dsh 报错或上下文错乱）。
         """
-        conn = await self._get_conn(user.tenant_id)
-        if session_id in self._active_sessions:
-            return
-        await conn.resume_session(
-            session_id=session_id,
-            cwd=str(self._workspace()),
-            mcp_servers=[self._kb_mcp_server(user)],
-        )
-        self._active_sessions.add(session_id)
+        async with self._session_lock(session_id):
+            conn = await self._get_conn(user.tenant_id)
+            if session_id in self._active_sessions:
+                if not self._mount_token_stale(session_id):
+                    return
+                logger.info("dsh 会话 %s 的 MCP 令牌临期，重建进程换新令牌", session_id)
+                async with self._lock:
+                    await self._close_locked()
+                conn = await self._get_conn(user.tenant_id)
+            await conn.resume_session(
+                session_id=session_id,
+                cwd=str(self._workspace()),
+                mcp_servers=[self._kb_mcp_server(user)],
+            )
+            self._active_sessions.add(session_id)
+            self._mount_times[session_id] = time.monotonic()
 
     # ------------------------------------------------------------------
     # 运行一轮 agent 对话
@@ -363,7 +438,14 @@ class AcpBridge:
 
         调用前必须已通过 new_session/resume_session 激活会话。
         事件经 _ClientHandler 按 session_id 分发到本轮的订阅队列。
+        同一会话的并发 prompt 经会话锁串行化（dsh 单会话不支持并发 turn，
+        并发会串帧、重复落库）。
         """
+        async with self._session_lock(dsh_session_id):
+            async for item in self._run_turn(user, dsh_session_id, question):
+                yield item
+
+    async def _run_turn(self, user: User, dsh_session_id: str, question: str):
         try:
             conn = await self._get_conn(user.tenant_id)
         except Exception as exc:

@@ -141,20 +141,27 @@ async def ask_stream(
         # 心跳保活：LLM 思考/工具调用可能长时间无帧，期间每 15s 发一条 SSE 注释，
         # 防止中间代理（nginx 默认 60s 读超时）因静默掐断连接
         pending: asyncio.Task | None = None
-        while True:
-            if pending is None:
-                pending = asyncio.create_task(agen.__anext__())
-            done, _ = await asyncio.wait({pending}, timeout=15)
-            if not done:
-                yield ": ping\n\n"
-                continue
-            try:
-                event = pending.result()
-            except StopAsyncIteration:
-                break
-            finally:
-                pending = None
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(agen.__anext__())
+                done, _ = await asyncio.wait({pending}, timeout=15)
+                if not done:
+                    yield ": ping\n\n"
+                    continue
+                try:
+                    event = pending.result()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    pending = None
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            # 客户端断连（生成器被关闭/取消）：停掉在飞的取帧任务并关闭底层生成器，
+            # 让 stream_chat_events 的清理逻辑取消 LLM/agent 流，不再空跑完整轮
+            if pending is not None:
+                pending.cancel()
+            await agen.aclose()
 
     return StreamingResponse(
         event_source(),
@@ -188,20 +195,27 @@ async def ask_agent_stream(
         agen = stream_agent_chat_events(db, user, body.question, session)
         # 心跳保活（同 /ask/stream）：agent 工具调用可能长时间无帧
         pending: asyncio.Task | None = None
-        while True:
-            if pending is None:
-                pending = asyncio.create_task(agen.__anext__())
-            done, _ = await asyncio.wait({pending}, timeout=15)
-            if not done:
-                yield ": ping\n\n"
-                continue
-            try:
-                event = pending.result()
-            except StopAsyncIteration:
-                break
-            finally:
-                pending = None
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        try:
+            while True:
+                if pending is None:
+                    pending = asyncio.create_task(agen.__anext__())
+                done, _ = await asyncio.wait({pending}, timeout=15)
+                if not done:
+                    yield ": ping\n\n"
+                    continue
+                try:
+                    event = pending.result()
+                except StopAsyncIteration:
+                    break
+                finally:
+                    pending = None
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        finally:
+            # 客户端断连：关闭底层生成器，触发 acp_bridge.run_turn 的清理
+            # （取消本轮 prompt 并通知 dsh cancel），避免 agent 空跑完整轮
+            if pending is not None:
+                pending.cancel()
+            await agen.aclose()
 
     return StreamingResponse(
         event_source(),

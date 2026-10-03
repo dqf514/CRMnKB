@@ -73,6 +73,10 @@ async def init_db() -> None:
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}'")
         )
+        # 首登强制改密标记（种子 admin 置 True，改密成功后由 /auth/password 置 False）
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE")
+        )
         await conn.execute(
             text("ALTER TABLE knowledge_documents ADD COLUMN IF NOT EXISTS kb_id BIGINT")
         )
@@ -116,6 +120,13 @@ async def init_db() -> None:
         # 文件夹权限：与文件一致——owner_id + is_private（存量置为管理员私有，与文件行为对齐）
         await conn.execute(text("ALTER TABLE library_folders ADD COLUMN IF NOT EXISTS owner_id BIGINT"))
         await conn.execute(text("ALTER TABLE library_folders ADD COLUMN IF NOT EXISTS is_private BOOLEAN"))
+        # 任务来源标记：ai_generated + source（manual/rule/ai_analysis），与 models/task.py 对齐
+        await conn.execute(
+            text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS ai_generated BOOLEAN DEFAULT FALSE")
+        )
+        await conn.execute(
+            text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS source VARCHAR(50) DEFAULT 'manual'")
+        )
         # 时区统一：历史 timestamptz 列转 naive TIMESTAMP（连接时区已为 UTC，转换值即 UTC）
         await conn.execute(text("ALTER TABLE tasks ALTER COLUMN due_date TYPE TIMESTAMP"))
         await conn.execute(text("ALTER TABLE tasks ALTER COLUMN completed_at TYPE TIMESTAMP"))
@@ -135,6 +146,9 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS is_private BOOLEAN"))
         await conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS resource_type VARCHAR(20)"))
         await conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS resource_id BIGINT"))
+        # 提醒通知去重键（规则 id + 业务对象 id）：不用渲染后标题去重，
+        # 含 {{hours_left}} 等模板的标题每轮渲染结果不同会导致重复通知
+        await conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS dedupe_key VARCHAR(200)"))
         # PR-H：上传自动入库——加 is_auto 列 + 部分唯一索引
         await conn.execute(
             text("ALTER TABLE knowledge_bases ADD COLUMN IF NOT EXISTS is_auto BOOLEAN DEFAULT FALSE")
@@ -309,6 +323,7 @@ async def init_db() -> None:
             password_hash=hash_password("admin123"),
             name="管理员",
             role="admin",
+            must_change_password=True,  # 初始口令 admin123 仅用于首登，登录后强制改密
         )
         session.add(admin)
         # 示例提醒规则：7 天未跟进（默认关闭，由用户自行开启）

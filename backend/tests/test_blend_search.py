@@ -116,12 +116,28 @@ async def test_blend_full_pipeline_returns_ranked_results():
     # SQL 已 ORDER BY comprehensive_score DESC，mock 模拟该顺序
     assert [r["chunk_id"] for r in result] == [1, 3, 2]
     assert [r["score"] for r in result] == [1.2, 0.9, 0.7]
-    # 阶段 2 SQL 应包含 websearch_to_tsquery + ts_rank_cd
+    # 阶段 2 SQL 应包含 plainto_tsquery + ts_rank_cd
     sql2 = db.calls[1]["sql"]
     assert "ts_rank_cd" in sql2
-    assert "websearch_to_tsquery" in sql2
+    assert "plainto_tsquery" in sql2
     assert "VALUES" in sql2
     assert "comprehensive_score" in sql2
+
+
+async def test_blend_uses_plainto_tsquery_quote_safe():
+    """含引号的查询不应让 tsquery 抛错：blend 与 keyword 路径一致用 plainto_tsquery。
+
+    websearch_to_tsquery 遇引号会抛错导致整条 blend 检索降级，plainto 对任意输入安全。
+    """
+    db = _FakeSession([_FakeResult([_vector_row(1)]), _FakeResult([])])
+    await search_chunks_blend(
+        db, tenant_id=1, query_vec=[0.1], question='他说"你好"吗', limit=5,
+        score_threshold=0.5,
+    )
+    sql2 = db.calls[1]["sql"]
+    assert "plainto_tsquery" in sql2
+    assert "websearch_to_tsquery" not in sql2
+    assert db.calls[1]["params"]["q"] == '他说"你好"吗'
 
 
 async def test_blend_threshold_filters_results():

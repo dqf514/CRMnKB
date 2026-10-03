@@ -23,3 +23,5 @@ class Notification(Base):
     # 分享通知的跳转目标（type='share' 时使用）：kb / file / notebook
     resource_type: Mapped[str | None]
     resource_id: Mapped[int | None]
+    # 提醒通知去重键（规则 id + 业务对象 id，不用渲染后标题）：仅提醒规则写入
+    dedupe_key: Mapped[str | None]

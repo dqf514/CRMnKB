@@ -28,18 +28,31 @@ from app.services.skills.registry import (
 
 router = APIRouter(prefix="/admin", tags=["admin-skills"], dependencies=[Depends(require_admin)])
 
-_SENSITIVE_MARKS = ("key", "secret", "token", "password")
+_SENSITIVE_MARKS = ("key", "secret", "token", "password", "authorization")
+
+
+def _is_sensitive_key(key: object) -> bool:
+    return isinstance(key, str) and any(mark in key.lower() for mark in _SENSITIVE_MARKS)
 
 
 def _mask_config(config: dict) -> dict:
-    """config 中 key/secret/token/password 命名的字段脱敏（沿用 admin_llm 惯例）。"""
-    masked = {}
-    for k, v in (config or {}).items():
-        if isinstance(v, str) and any(mark in k.lower() for mark in _SENSITIVE_MARKS):
-            masked[k] = mask_api_key(v)
-        else:
-            masked[k] = v
-    return masked
+    """config 敏感字段脱敏（沿用 admin_llm 惯例）。
+
+    递归处理：任意深度下键名含 key/secret/token/password/authorization（不区分大小写）
+    的字符串值都脱敏，覆盖 headers.Authorization 等嵌套密钥；嵌套 dict/list 原样深入。
+    """
+
+    def _mask(node):
+        if isinstance(node, dict):
+            return {
+                k: mask_api_key(v) if _is_sensitive_key(k) and isinstance(v, str) else _mask(v)
+                for k, v in node.items()
+            }
+        if isinstance(node, list):
+            return [_mask(item) for item in node]
+        return node
+
+    return _mask(config or {})
 
 
 def _extract_timeout(config: dict | None) -> int:

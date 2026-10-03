@@ -1,6 +1,10 @@
 """系统告警检查：磁盘 / 内存 / LLM 失败 超阈值时通知管理员。
 
 只在状态翻转时通知一次（cross → notify，恢复 → 重置），避免刷屏。
+
+另外挂了一个周期性的定时自动备份检查（maybe_auto_backup）——lifespan 的
+周期调度循环在 main.py，告警循环是服务层可调用的既有周期入口；备份逻辑本身
+在 services/backup.py，开关与去重都在那里。
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -13,6 +17,7 @@ from app.database import AsyncSessionLocal
 from app.models.error_log import ErrorLog
 from app.models.notification import Notification
 from app.models.user import User
+from app.services.backup import maybe_auto_backup
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +54,10 @@ async def check_alerts() -> list[str]:
     """跑一轮告警检查，返回本次新触发的告警名。"""
     fired: list[str] = []
     async with AsyncSessionLocal() as session:
-        # 磁盘
+        # 磁盘：测 uploads 目录所在的文件系统（容器里 uploads 是独立挂载卷，
+        # 传路径让 psutil 定位到该卷的挂载点；传 anchor 只会测到 overlay 根层）
         try:
-            disk_pct = psutil.disk_usage(settings.upload_path.resolve().anchor).percent
+            disk_pct = psutil.disk_usage(str(settings.upload_path)).percent
         except Exception:
             disk_pct = 0
         if disk_pct >= settings.ALERT_DISK_PERCENT and not _state.get("disk"):
@@ -99,4 +105,12 @@ async def check_alerts() -> list[str]:
             fired.append("llm")
         elif llm_fails < settings.ALERT_LLM_FAIL_THRESHOLD:
             _state["llm"] = False
+
+    # 定时自动备份（system_settings backup_auto_enabled 开启时每个 UTC 日一次，
+    # 内部按日去重；默认关）。挂在告警循环是因为 lifespan 周期调度在 main.py，
+    # 这里是服务层既有的周期入口；失败只记日志不影响告警
+    try:
+        await maybe_auto_backup()
+    except Exception as exc:
+        logger.warning("定时自动备份检查失败（下轮重试）: %s", exc)
     return fired

@@ -42,8 +42,10 @@ from app.api import (
     users,
     workflows,
 )
+from sqlalchemy import text
+
 from app.config import settings
-from app.database import init_db
+from app.database import AsyncSessionLocal, init_db
 from app.services import mcp_server as kb_mcp_server
 from app.services.error_log import log_error
 from app.services.monitoring import check_alerts
@@ -52,6 +54,25 @@ from app.services.workflow import run_due_workflows
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+# 多 worker 防重复调度：周期任务入口用 PG 会话级咨询锁（固定 key）互斥，
+# 抢不到锁的 worker 本轮直接跳过；单 worker 下总能抢到，行为不变。
+_ADVISORY_KEY_REMINDER = 727301
+_ADVISORY_KEY_WORKFLOW = 727302
+
+
+async def _with_pg_advisory_lock(key: int, work):
+    """抢到 pg_try_advisory_lock 才执行 work()，抢不到返回 None（本轮跳过）。
+    锁由本函数持有的连接承载；work 内部自建会话不受影响。"""
+    async with AsyncSessionLocal() as session:
+        got = await session.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+        if not got:
+            return None
+        try:
+            return await work()
+        finally:
+            await session.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
 
 
 async def _alert_loop() -> None:
@@ -73,14 +94,14 @@ async def _reminder_loop() -> None:
     interval = max(settings.REMINDER_INTERVAL_MINUTES, 1) * 60
     while True:
         try:
-            result = await run_all_rules()
-            if result["tasks_created"] or result["notifications_created"]:
+            result = await _with_pg_advisory_lock(_ADVISORY_KEY_REMINDER, run_all_rules)
+            if result and (result["tasks_created"] or result["notifications_created"]):
                 logger.info("提醒规则本轮生成: %s", result)
         except Exception as exc:
             logger.warning("提醒规则周期任务失败（下轮重试）: %s", exc)
         try:
-            wf_result = await run_due_workflows()
-            if wf_result["executed"]:
+            wf_result = await _with_pg_advisory_lock(_ADVISORY_KEY_WORKFLOW, run_due_workflows)
+            if wf_result and wf_result["executed"]:
                 logger.info("工作流本轮执行: %s", wf_result)
         except Exception as exc:
             logger.warning("工作流周期任务失败（下轮重试）: %s", exc)

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, String, func
+from sqlalchemy import Boolean, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -32,4 +32,6 @@ class User(Base):
     wechat_unionid: Mapped[str | None] = mapped_column(String(64))
     avatar_url: Mapped[str | None] = mapped_column(String(500))
     preferences: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 首登强制改密：True 时登录后必须改密（种子 admin 默认 True，改密成功后置 False）
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

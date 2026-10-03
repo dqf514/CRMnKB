@@ -10,7 +10,7 @@ class ReportGenerateRequest(BaseModel):
     end_date: date | None = None
     # custom 类型必填：自然语言报告需求
     prompt: str | None = Field(default=None, min_length=1, max_length=2000)
-    kb_ids: list[int] | None = None  # 检索范围，空则全租户
+    kb_ids: list[int] | None = None  # 检索范围，空则当前用户可读的全部知识库
     file_ids: list[int] | None = None  # 对话附加文件（标注来源用）
     # AI 生成超时（秒），默认读后端 LLM_CHAT_TIMEOUT_SECONDS；范围 30~600
     timeout: int | None = Field(default=None, ge=30, le=600)

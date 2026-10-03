@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field, field_validator
+import json
+
+from pydantic import BaseModel, Field, RootModel, field_validator
 
 # 中国大陆手机号格式（为后续手机号登录/微信绑定预留的账号标识）
 CN_MOBILE_PATTERN = r"^1[3-9]\d{9}$"
@@ -23,6 +25,8 @@ class UserOut(BaseModel):
     email: str | None = None
     phone: str | None = None
     avatar_url: str | None = None
+    # 首登强制改密标记（种子 admin 等为 True；前端登录后拦截到改密页）
+    must_change_password: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -46,7 +50,8 @@ class ProfileUpdate(BaseModel):
     name: str | None = None
     email: str | None = None
     phone: str | None = Field(None, pattern=CN_MOBILE_PATTERN)
-    avatar_url: str | None = None
+    # 不接受 avatar_url：头像只能走 POST /auth/avatar 上传端点（含 MIME/魔数校验），
+    # 直接传 URL 会绕过校验并可指向任意地址；pydantic 默认忽略未知字段（静默丢弃）。
 
     _norm_phone = field_validator("phone", mode="before")(_normalize_phone)
 
@@ -54,6 +59,21 @@ class ProfileUpdate(BaseModel):
 class PasswordChange(BaseModel):
     old_password: str
     new_password: str = Field(min_length=8)
+
+
+_PREFERENCES_MAX_BYTES = 16 * 1024
+
+
+class PreferencesUpdate(RootModel[dict]):
+    """用户偏好设置：任意 JSON 对象，序列化后体积上限 16KB（防 JSONB 无限膨胀）。"""
+
+    @field_validator("root")
+    @classmethod
+    def _check_size(cls, v: dict) -> dict:
+        size = len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
+        if size > _PREFERENCES_MAX_BYTES:
+            raise ValueError(f"preferences 体积超限（>{_PREFERENCES_MAX_BYTES // 1024}KB）")
+        return v
 
 
 class SmsCodeRequest(BaseModel):

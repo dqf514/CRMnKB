@@ -21,7 +21,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/brand", tags=["brand"])
 
-_LOGO_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".svg"}
+# logo 仅允许位图格式。SVG 可内嵌脚本，经 /brand 静态服务同源吐出即存储型 XSS，
+# 故新上传直接拒绝 SVG；data/brand/ 下若存在历史存量 logo.svg 文件不主动清理（仍会被服务），
+# 管理员重新上传 png/jpg/jpeg/webp 后旧文件即被覆盖清理。
+_LOGO_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 _MAX_LOGO_BYTES = 5 * 1024 * 1024
 
 
@@ -85,7 +88,7 @@ async def upload_logo(
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
-    """上传自定义 logo（png/jpg/jpeg/webp/svg，≤5MB），覆盖旧 logo。"""
+    """上传自定义 logo（png/jpg/jpeg/webp，≤5MB），覆盖旧 logo。"""
     ext = Path(file.filename or "").suffix.lower()
     if ext not in _LOGO_EXTS:
         raise HTTPException(status_code=400, detail=f"仅支持 {'/'.join(sorted(_LOGO_EXTS))} 图片格式")

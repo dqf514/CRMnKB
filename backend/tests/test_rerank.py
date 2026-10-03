@@ -217,6 +217,55 @@ async def test_rerank_both_fail_returns_none(monkeypatch):
     assert await rag_module.rerank_chunks("问题", _candidates()) is None
 
 
+async def test_rerank_passes_tenant_and_user(monkeypatch):
+    """tenant_id/user_id 透传到 rerank/chat 模型解析（按租户选模型、用量记正确租户）。"""
+    seen: dict = {}
+
+    async def _resolve_rerank(caller=None, tenant_id=None, user_id=None, **kw):
+        seen.update(rerank_tenant=tenant_id, rerank_user=user_id)
+        return None
+
+    async def _resolve_chat(caller=None, tenant_id=None, user_id=None, **kw):
+        seen.update(chat_tenant=tenant_id, chat_user=user_id)
+
+        class _FakeChat:
+            async def chat(self, messages, **kw):
+                return "[0.5, 0.6]"
+
+        return _FakeChat()
+
+    monkeypatch.setattr(rag_module, "resolve_rerank_llm", _resolve_rerank)
+    monkeypatch.setattr(rag_module, "resolve_chat_llm", _resolve_chat)
+
+    result = await rag_module.rerank_chunks("问题", _candidates(), tenant_id=3, user_id=8)
+    assert result is not None
+    assert seen == {
+        "rerank_tenant": 3, "rerank_user": 8,
+        "chat_tenant": 3, "chat_user": 8,
+    }
+
+
+async def test_rewrite_passes_tenant_and_user(monkeypatch):
+    """问题改写同样透传 tenant_id/user_id。"""
+    seen: dict = {}
+
+    async def _resolve_chat(caller=None, tenant_id=None, user_id=None, **kw):
+        seen.update(caller=caller, tenant_id=tenant_id, user_id=user_id)
+
+        class _FakeChat:
+            async def chat(self, messages, **kw):
+                return "改写后的问题"
+
+        return _FakeChat()
+
+    monkeypatch.setattr(rag_module, "resolve_chat_llm", _resolve_chat)
+    out = await rag_module.rewrite_question(
+        "他呢", [{"role": "user", "content": "甲公司怎么样"}], tenant_id=3, user_id=8
+    )
+    assert out == "改写后的问题"
+    assert seen == {"caller": "rewrite", "tenant_id": 3, "user_id": 8}
+
+
 # ---------------------------------------------------------------------------
 # 管理端：model_type=rerank 校验与连通性测试
 # ---------------------------------------------------------------------------

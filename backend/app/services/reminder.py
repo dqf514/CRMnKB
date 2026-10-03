@@ -117,15 +117,16 @@ async def _open_rule_task_exists(
 
 
 async def _notification_exists(
-    session: AsyncSession, tenant_id: int, task_id: int, title: str
+    session: AsyncSession, tenant_id: int, dedupe_key: str
 ) -> bool:
+    """按去重键（规则 id + 业务对象 id）判定提醒通知是否已发。
+    不能用渲染后标题去重：含 {{hours_left}} 等模板的标题每轮渲染结果不同，会重复通知。"""
     stmt = (
         select(func.count())
         .select_from(Notification)
         .where(
             Notification.tenant_id == tenant_id,
-            Notification.task_id == task_id,
-            Notification.title == title,
+            Notification.dedupe_key == dedupe_key,
         )
     )
     return (await session.scalar(stmt)) > 0
@@ -271,9 +272,12 @@ async def _run_task_due_soon(
     ]
     notifications_created = 0
     for m in match_due_soon_tasks(rows, threshold, now):
-        title = render_template(template, {"title": m["title"], "hours_left": m["hours_left"]})
-        if await _notification_exists(session, rule.tenant_id, m["task_id"], title):
+        # 去重键 = 规则 id + 业务对象 id + 到期时间（到期时间入键：任务改期后可再次提醒）；
+        # 不含 hours_left 等渲染变量，否则每轮渲染结果不同导致重复通知
+        dedupe_key = f"rule:{rule.id}:task:{m['task_id']}:{m['due_date'].isoformat()}"
+        if await _notification_exists(session, rule.tenant_id, dedupe_key):
             continue
+        title = render_template(template, {"title": m["title"], "hours_left": m["hours_left"]})
         session.add(
             Notification(
                 tenant_id=rule.tenant_id,
@@ -283,6 +287,7 @@ async def _run_task_due_soon(
                 content=f"任务「{m['title']}」将于 {m['due_date']} 到期",
                 type="reminder",
                 is_read=False,
+                dedupe_key=dedupe_key,
             )
         )
         notifications_created += 1
@@ -306,9 +311,9 @@ async def _run_rule(session: AsyncSession, rule: ReminderRule, now: datetime) ->
 
 async def run_all_rules(tenant_id: int | None = None) -> dict:
     """跑一轮启用的提醒规则。tenant_id 限定单租户（手动触发）；None 跑全部（调度循环）。"""
-    # naive UTC（项目约定：DB 时间戳均为 timestamp without time zone，
-    # 与查询出的 naive 值做减法时带时区会抛 TypeError）
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    # aware UTC：DB 时间戳列虽为 naive TIMESTAMP（UTC），但行数据经 _aware() 统一
+    # 转为 aware UTC，纯函数匹配层全程用 aware 比较，避免 naive/aware 混算抛 TypeError
+    now = datetime.now(timezone.utc)
     tasks_created = 0
     notifications_created = 0
     async with AsyncSessionLocal() as session:

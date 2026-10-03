@@ -39,6 +39,7 @@ class _FakeSession:
         self._execute_queue = []
         self._get_queue = []
         self.added = []
+        self.stmts = []
 
     def queue_execute(self, value):
         self._execute_queue.append(value)
@@ -47,7 +48,12 @@ class _FakeSession:
         self._get_queue.append(value)
 
     async def execute(self, stmt, params=None):
+        self.stmts.append(stmt)
         return _FakeResult(self._execute_queue.pop(0) if self._execute_queue else None)
+
+    async def scalar(self, stmt):
+        self.stmts.append(stmt)
+        return self._execute_queue.pop(0) if self._execute_queue else None
 
     async def get(self, model, ident):
         return self._get_queue.pop(0) if self._get_queue else None
@@ -92,9 +98,9 @@ async def client():
     app.dependency_overrides.clear()
 
 
-def _override(db, tenant_id=1, user_id=1):
+def _override(db, tenant_id=1, user_id=1, role="admin"):
     async def _fake_user():
-        return SimpleNamespace(id=user_id, tenant_id=tenant_id, username="u", name="用户", role="admin", status=1)
+        return SimpleNamespace(id=user_id, tenant_id=tenant_id, username="u", name="用户", role=role, status=1)
 
     async def _fake_db():
         yield db
@@ -239,7 +245,7 @@ async def _run_service(report, monkeypatch, chat_text=None, aggregate=None, chat
     monkeypatch.setattr("app.services.error_log.log_error", _noop_log)
 
     if aggregate is not None:
-        async def _aggregate(db, tenant_id, prompt, kb_ids=None, file_ids=None):
+        async def _aggregate(db, tenant_id, prompt, kb_ids=None, file_ids=None, user=None):
             return aggregate
 
         monkeypatch.setattr(report_svc, "aggregate_custom", _aggregate)
@@ -292,7 +298,7 @@ async def test_generate_report_custom_embed_unavailable(monkeypatch):
         status="generating", content=None, error=None,
     )
 
-    async def _agg_fail(db, tenant_id, prompt, kb_ids=None, file_ids=None):
+    async def _agg_fail(db, tenant_id, prompt, kb_ids=None, file_ids=None, user=None):
         raise EmbeddingUnavailable()
 
     monkeypatch.setattr(report_svc, "aggregate_custom", _agg_fail)
@@ -539,3 +545,201 @@ def test_html_from_markdown_prompt():
     msgs = report_svc.build_html_from_markdown_prompt("# 标题\n正文", "zh")
     assert msgs[0]["role"] == "system" and "HTML" in msgs[0]["content"]
     assert "# 标题" in msgs[1]["content"]
+
+
+# ---------------------------------------------------------------------------
+# ACL：custom 生成按用户可读范围过滤（API 层）
+# ---------------------------------------------------------------------------
+
+async def test_generate_custom_filters_inaccessible_ids(client, monkeypatch):
+    """显式传入的 kb/file id 经用户级 ACL 过滤，只保留可读子集写入 params。"""
+    db = _FakeSession()
+    _override(db, role="member")
+    db.queue_execute([3, 4])  # kb 存在性校验（租户内均存在）
+    db.queue_execute([5, 6])  # file 存在性校验
+
+    async def _filter(db_, user, rtype, ids):
+        return [i for i in ids if i in (3, 5)]  # 4 号 KB、6 号文件不可读
+
+    async def _noop_generate(report_id):
+        pass
+
+    monkeypatch.setattr("app.api.reports.filter_accessible_ids", _filter)
+    monkeypatch.setattr("app.api.reports.generate_report", _noop_generate)
+    resp = await client.post(
+        "/api/v1/reports/generate",
+        json={"type": "custom", "prompt": "分析", "kb_ids": [3, 4], "file_ids": [5, 6]},
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["params"]["kb_ids"] == [3]
+    assert data["params"]["file_ids"] == [5]
+
+
+async def test_generate_custom_all_inaccessible_rejected(client, monkeypatch):
+    """显式传入的 id 全部不可读 → 400（无可读内容）。"""
+    db = _FakeSession()
+    _override(db, role="member")
+    db.queue_execute([4])  # kb 存在但用户不可读
+
+    async def _filter(db_, user, rtype, ids):
+        return []
+
+    monkeypatch.setattr("app.api.reports.filter_accessible_ids", _filter)
+    resp = await client.post(
+        "/api/v1/reports/generate",
+        json={"type": "custom", "prompt": "分析", "kb_ids": [4]},
+    )
+    assert resp.status_code == 400
+    assert "阅读权限" in resp.json()["detail"]
+
+
+async def test_generate_custom_empty_ids_scoped_to_accessible(client, monkeypatch):
+    """未传 kb_ids 时：params 写入"当前用户可读的 KB 列表"，而非全租户不设限。"""
+    db = _FakeSession()
+    _override(db, role="member")
+
+    async def _accessible(db_, user, rtype):
+        assert rtype == "kb"
+        return [7, 8]
+
+    async def _noop_generate(report_id):
+        pass
+
+    monkeypatch.setattr("app.api.reports.accessible_ids", _accessible)
+    monkeypatch.setattr("app.api.reports.generate_report", _noop_generate)
+    resp = await client.post(
+        "/api/v1/reports/generate", json={"type": "custom", "prompt": "分析"}
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["params"]["kb_ids"] == [7, 8]
+    assert data["params"]["file_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# ACL：aggregate_custom 按用户可读范围约束检索（service 层）
+# ---------------------------------------------------------------------------
+
+async def test_aggregate_custom_applies_user_acl(monkeypatch):
+    """提供 user 时：显式 kb_ids/file_ids 先经 ACL 过滤再下推到检索。"""
+    db = _FakeSession()
+    user = SimpleNamespace(id=2, tenant_id=1, role="member")
+    captured = {}
+
+    async def _filter(db_, u, rtype, ids):
+        return [i for i in ids if i != 4]  # 4 号资源不可读
+
+    class _FakeEmbed:
+        async def embed(self, texts):
+            return [[0.1, 0.2]]
+
+    async def _resolve_embed(**kw):
+        return _FakeEmbed()
+
+    async def _vec(db_, tid, vec, limit, kb_ids=None, file_ids=None):
+        captured["kb_ids"] = kb_ids
+        captured["file_ids"] = file_ids
+        return []
+
+    async def _kw(db_, tid, q, limit, kb_ids=None, file_ids=None):
+        return []
+
+    monkeypatch.setattr(report_svc, "filter_accessible_ids", _filter)
+    monkeypatch.setattr(report_svc, "resolve_embed_llm", _resolve_embed)
+    monkeypatch.setattr(report_svc, "search_chunks_vector", _vec)
+    monkeypatch.setattr(report_svc, "search_chunks_keyword", _kw)
+
+    result = await report_svc.aggregate_custom(db, 1, "销量分析", [3, 4], [4, 5], user=user)
+
+    assert result == {"context": "", "sources": []}
+    assert captured["kb_ids"] == [3]  # 4 号 KB 被过滤
+    assert captured["file_ids"] == [5]  # 4 号文件被过滤
+
+
+async def test_aggregate_custom_empty_scope_returns_empty(monkeypatch):
+    """ACL 过滤后无可读范围：直接返回空素材，不做全租户检索（空列表≠不设限）。"""
+    db = _FakeSession()
+    user = SimpleNamespace(id=2, tenant_id=1, role="member")
+    called = {"embed": False, "search": False}
+
+    async def _accessible(db_, u, rtype):
+        return []
+
+    async def _resolve_embed(**kw):
+        called["embed"] = True
+        raise AssertionError("不应走到嵌入")
+
+    async def _vec(*a, **kw):
+        called["search"] = True
+        return []
+
+    monkeypatch.setattr(report_svc, "accessible_ids", _accessible)
+    monkeypatch.setattr(report_svc, "resolve_embed_llm", _resolve_embed)
+    monkeypatch.setattr(report_svc, "search_chunks_vector", _vec)
+
+    result = await report_svc.aggregate_custom(db, 1, "销量分析", user=user)
+
+    assert result == {"context": "", "sources": []}
+    assert not called["embed"] and not called["search"]
+
+
+# ---------------------------------------------------------------------------
+# 报告可见性：按属主隔离，admin 绕过
+# ---------------------------------------------------------------------------
+
+async def test_list_reports_non_admin_only_own(client):
+    """非 admin 列表只查自己的报告（SQL 带 user_id 过滤）。"""
+    db = _FakeSession()
+    _override(db, role="member", user_id=2)
+    db.queue_execute(1)  # total
+    db.queue_execute([_report_ns(user_id=2)])  # items
+    resp = await client.get("/api/v1/reports")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1
+    sqls = [str(s.compile(compile_kwargs={"literal_binds": True})) for s in db.stmts]
+    assert any("reports.user_id = 2" in sql for sql in sqls)
+
+
+async def test_list_reports_admin_sees_all(client):
+    """admin 列表不加 user_id 过滤（可见全部）。"""
+    db = _FakeSession()
+    _override(db, role="admin", user_id=1)
+    db.queue_execute(2)
+    db.queue_execute([_report_ns(user_id=1), _report_ns(id=10, user_id=2)])
+    resp = await client.get("/api/v1/reports")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 2
+    sqls = [str(s.compile(compile_kwargs={"literal_binds": True})) for s in db.stmts]
+    assert not any("reports.user_id =" in sql for sql in sqls)
+
+
+async def test_get_report_non_owner_404(client):
+    """非 admin 看他人报告 → 404（不暴露存在性）。"""
+    db = _FakeSession()
+    _override(db, role="member", user_id=2)
+    db.queue_get(_report_ns(user_id=1))  # 他人报告
+    resp = await client.get("/api/v1/reports/9")
+    assert resp.status_code == 404
+
+
+async def test_delete_report_non_owner_404(client):
+    """非 admin 删他人报告 → 404。"""
+    db = _FakeSession()
+    _override(db, role="member", user_id=2)
+    db.queue_get(_report_ns(user_id=1))
+    resp = await client.delete("/api/v1/reports/9")
+    assert resp.status_code == 404
+
+
+async def test_report_admin_bypasses_owner_check(client):
+    """admin 可读/删他人报告（与全局 admin 绕过 ACL 口径一致）。"""
+    db = _FakeSession()
+    _override(db, role="admin", user_id=2)
+    db.queue_get(_report_ns(user_id=1))
+    resp = await client.get("/api/v1/reports/9")
+    assert resp.status_code == 200
+
+    db.queue_get(_report_ns(user_id=1))
+    resp = await client.delete("/api/v1/reports/9")
+    assert resp.status_code == 204

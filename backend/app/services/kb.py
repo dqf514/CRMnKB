@@ -2,6 +2,7 @@ import logging
 import os
 from pathlib import Path
 
+from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,7 +10,9 @@ from app.models.document import KnowledgeDocument
 from app.models.knowledge_base import KnowledgeBase
 from app.models.library_file import LibraryFile
 from app.models.library_folder import LibraryFolder
+from app.models.user import User
 from app.services.ingestion import is_supported
+from app.services.permissions import ensure_access, filter_accessible_ids
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +111,19 @@ async def get_or_create_auto_kb(db: AsyncSession, tenant_id: int) -> KnowledgeBa
 # ---------------------------------------------------------------------------
 
 async def get_or_create_folder(
-    session: AsyncSession, tenant_id: int, parent_id: int | None, name: str
+    session: AsyncSession,
+    tenant_id: int,
+    parent_id: int | None,
+    name: str,
+    user: User | None = None,
 ) -> LibraryFolder:
+    """按（tenant, parent, name）查找或创建文件夹（上传路径自动建目录用）。
+
+    权限口径（防文件落进他人私有目录 / 产生 owner=NULL 的孤儿私有目录）：
+    - 传入 user 时命中已存在文件夹：要求对该文件夹有 edit 权限（写入操作），否则 403；
+    - 新建时 owner_id 落创建者（未传 user 则继承父目录 owner），is_private 继承父目录
+      （根目录缺省私有，与 ORM 默认一致）。
+    """
     stmt = select(LibraryFolder).where(
         LibraryFolder.tenant_id == tenant_id, LibraryFolder.name == name
     )
@@ -118,21 +132,42 @@ async def get_or_create_folder(
     else:
         stmt = stmt.where(LibraryFolder.parent_id == parent_id)
     folder = (await session.execute(stmt)).scalar_one_or_none()
-    if folder is None:
-        folder = LibraryFolder(tenant_id=tenant_id, parent_id=parent_id, name=name)
-        session.add(folder)
-        await session.flush()
+    if folder is not None:
+        if user is not None:
+            await ensure_access(session, user, "folder", folder.id, "edit")
+        return folder
+    parent = await session.get(LibraryFolder, parent_id) if parent_id is not None else None
+    owner_id = user.id if user is not None else (parent.owner_id if parent is not None else None)
+    is_private = bool(parent.is_private) if parent is not None else True
+    folder = LibraryFolder(
+        tenant_id=tenant_id,
+        parent_id=parent_id,
+        name=name,
+        owner_id=owner_id,
+        is_private=is_private,
+    )
+    session.add(folder)
+    await session.flush()
     return folder
 
 
 async def associate_files(
-    session: AsyncSession, tenant_id: int, kb_id: int, file_ids: list[int]
+    session: AsyncSession,
+    tenant_id: int,
+    kb_id: int,
+    file_ids: list[int],
+    user: User | None = None,
 ) -> dict:
     """把库文件关联到知识库：建 knowledge_documents 行（同 kb 同 file 幂等去重）。
     supported 的文档 status=processing（返回 parse_doc_ids 供后台解析），
-    不支持的直接 status=unsupported。"""
+    不支持的直接 status=unsupported。
+    传入 user 时整批校验其对各文件的 read 权限，任一无权即 403（防借关联绕过文件 ACL）。"""
     if not file_ids:
         return {"associated": 0, "already": 0, "parse_doc_ids": []}
+    if user is not None:
+        readable = set(await filter_accessible_ids(session, user, "file", file_ids))
+        if readable != set(file_ids):
+            raise HTTPException(status_code=403, detail="存在无权访问的文件")
     existing = set(
         (
             await session.execute(

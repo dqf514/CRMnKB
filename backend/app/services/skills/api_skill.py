@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.services.skills.base import Skill, truncate_result
-from app.services.skills.builtin import check_url_safe
+from app.services.skills.builtin import check_url_safe, checked_request
 
 _PLACEHOLDER = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
@@ -54,8 +54,9 @@ class ApiSkill(Skill):
         else:
             kwargs["json"] = args
 
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
-            resp = await client.request(method, url, **kwargs)
+        # follow_redirects=False：重定向由 checked_request 逐跳校验目标并跨主机剥敏感头
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+            resp = await checked_request(client, method, url, **kwargs)
             resp.raise_for_status()
             try:
                 data = resp.json()

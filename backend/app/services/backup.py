@@ -2,21 +2,29 @@
 
 备份：pg_dump（--clean --if-exists 便于恢复）+ 上传/品牌目录 tar.gz + manifest。
 保留最近 N 份。恢复：先还原上传目录，再导入 SQL（会先删表再重建，破坏性操作）。
+
+时间口径：备份目录名与 manifest 时间一律用 UTC（目录名带 Z 后缀明示）。
 """
 import asyncio
 import gzip
 import json
+import logging
 import shutil
 import subprocess
 import tarfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 RETENTION = 10  # 保留最近备份份数
 CONTAINER = settings.PG_DOCKER_CONTAINER
+
+# 定时自动备份开关（system_settings 键，"true" 开启；默认关）
+AUTO_BACKUP_KEY = "backup_auto_enabled"
 
 
 def _db_creds() -> dict:
@@ -70,9 +78,10 @@ def _manifest_path(d: Path) -> Path:
 
 
 async def run_backup() -> str:
-    """执行一次完整备份，返回备份名（时间戳目录名）。"""
+    """执行一次完整备份，返回备份名（UTC 时间戳目录名，Z 后缀明示 UTC 口径）。"""
     creds = _db_creds()
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    now_utc = datetime.now(timezone.utc)
+    ts = now_utc.strftime("%Y%m%d_%H%M%SZ")
     d = settings.backup_path / ts
     d.mkdir(parents=True, exist_ok=True)
     try:
@@ -90,7 +99,7 @@ async def run_backup() -> str:
             json.dumps(
                 {
                     "ts": ts,
-                    "created_at": datetime.now().isoformat(),
+                    "created_at": now_utc.isoformat(),  # aware UTC（+00:00 结尾）
                     "db_bytes": len(dump),
                     "uploads_bytes": (d / "uploads.tar.gz").stat().st_size,
                 },
@@ -103,6 +112,30 @@ async def run_backup() -> str:
         raise
     await _prune()
     return ts
+
+
+async def maybe_auto_backup() -> str | None:
+    """定时自动备份：system_settings 的 backup_auto_enabled 开启时，每个 UTC 日最多备份一次。
+
+    由后台周期任务调用（挂在 monitoring.check_alerts 的告警循环上，见该处注释）；
+    返回新备份名，未开启或当日已有备份返回 None。
+    注意：与提醒循环同为单 worker 假设——多 worker 部署可能并发重复备份
+    （待统一引入 pg_try_advisory_lock 抢锁）。
+    """
+    from app.database import AsyncSessionLocal
+    from app.models.system_setting import SystemSetting
+
+    async with AsyncSessionLocal() as db:
+        row = await db.get(SystemSetting, AUTO_BACKUP_KEY)
+    enabled = (row.value if row else "").strip().lower() in {"1", "true", "on", "yes"}
+    if not enabled:
+        return None
+    today_prefix = datetime.now(timezone.utc).strftime("%Y%m%d")
+    if any(b["name"].startswith(today_prefix) for b in await list_backups()):
+        return None
+    name = await run_backup()
+    logger.info("定时自动备份完成: %s", name)
+    return name
 
 
 async def list_backups() -> list[dict]:

@@ -362,7 +362,9 @@ async def _prepare(
 
     search_question = question
     if settings.RAG_QUERY_REWRITE and history:
-        search_question = await rewrite_question(question, history)
+        search_question = await rewrite_question(
+            question, history, tenant_id=tenant_id, user_id=user.id if user else None
+        )
 
     try:
         embed_llm = await resolve_embed_llm(caller="chat", tenant_id=tenant_id)
@@ -424,7 +426,12 @@ async def _prepare(
         candidates.sort(key=lambda x: float(x["score"]), reverse=True)
         candidates = candidates[: top_k * 2]
 
-    reranked = await rerank_chunks(search_question, candidates) if settings.RAG_RERANK else None
+    reranked = (
+        await rerank_chunks(
+            search_question, candidates, tenant_id=tenant_id, user_id=user.id if user else None
+        )
+        if settings.RAG_RERANK else None
+    )
     if reranked is not None:
         # rerank 只用于排序：取 top_k 交给 LLM 判断相关性，不做硬阈值过滤
         # （本地嵌入/chat 模型的分数分布不校准，硬阈值会误杀真实命中）
@@ -665,12 +672,18 @@ async def stream_chat_events(
         try:
             chat_llm = await resolve_chat_llm(caller="chat", tenant_id=user.tenant_id, user_id=user.id)
             parts: list[str] = []
-            async for token in _clean_stream(
-                chat_llm.chat_stream(_fallback_messages(history, question), **extra_kw)
-            ):
-                parts.append(token)
-                yield {"type": "token", "content": token}
-            answer = "".join(parts)
+            llm_stream = chat_llm.chat_stream(_fallback_messages(history, question), **extra_kw)
+            try:
+                async for token in _clean_stream(llm_stream):
+                    parts.append(token)
+                    yield {"type": "token", "content": token}
+                answer = "".join(parts)
+            finally:
+                # 客户端断连（GeneratorExit）：主动关闭底层 LLM 流，中止 HTTP 长连接
+                try:
+                    await llm_stream.aclose()
+                except Exception:
+                    pass
             if not answer:
                 answer = FALLBACK_ANSWER
                 yield {"type": "token", "content": answer}
@@ -715,19 +728,24 @@ async def stream_chat_events(
                     )
                 )
                 # 边跑边排空事件；agent 结束后清空剩余
-                while True:
-                    if agent_task.done():
-                        while not events_q.empty():
-                            try:
-                                yield events_q.get_nowait()
-                            except asyncio.QueueEmpty:
-                                break
-                        break
-                    try:
-                        ev = await asyncio.wait_for(events_q.get(), timeout=0.3)
-                        yield ev
-                    except asyncio.TimeoutError:
-                        continue
+                try:
+                    while True:
+                        if agent_task.done():
+                            while not events_q.empty():
+                                try:
+                                    yield events_q.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    break
+                            break
+                        try:
+                            ev = await asyncio.wait_for(events_q.get(), timeout=0.3)
+                            yield ev
+                        except asyncio.TimeoutError:
+                            continue
+                finally:
+                    if not agent_task.done():
+                        # 客户端断连（GeneratorExit）：取消 agent 循环，不再空跑完整轮
+                        agent_task.cancel()
                 try:
                     agent_result = agent_task.result()
                 except RuntimeError:
@@ -739,10 +757,18 @@ async def stream_chat_events(
                     if not answer or answer == FALLBACK_ANSWER:
                         yield {"type": "token", "content": answer}
             if need_stream:
-                async for token in _clean_stream(chat_llm.chat_stream(messages, **extra_kw)):
-                    parts.append(token)
-                    yield {"type": "token", "content": token}
-                answer = "".join(parts)
+                llm_stream = chat_llm.chat_stream(messages, **extra_kw)
+                try:
+                    async for token in _clean_stream(llm_stream):
+                        parts.append(token)
+                        yield {"type": "token", "content": token}
+                    answer = "".join(parts)
+                finally:
+                    # 客户端断连（GeneratorExit）：主动关闭底层 LLM 流，中止 HTTP 长连接
+                    try:
+                        await llm_stream.aclose()
+                    except Exception:
+                        pass
         except Exception:
             logger.warning("流式生成失败", exc_info=True)
             yield {"type": "error", "detail": "生成失败，请稍后重试"}
@@ -852,8 +878,9 @@ async def stream_agent_chat_events(
     call_names: dict[str, str] = {}
     final_response = ""
     finish_reason: str | None = None
+    turn_agen = bridge.run_turn(user, dsh_sid, prompt_text)
     try:
-        async for item in bridge.run_turn(user, dsh_sid, prompt_text):
+        async for item in turn_agen:
             if item["kind"] == "error":
                 yield {"type": "error", "detail": item["detail"]}
                 return
@@ -897,6 +924,10 @@ async def stream_agent_chat_events(
         logger.exception("dsh agent 流式运行失败")
         yield {"type": "error", "detail": "agent 运行失败，请稍后重试"}
         return
+    finally:
+        # 客户端断连（GeneratorExit）时主动关闭 run_turn 生成器，
+        # 触发其 finally：取消本轮 prompt 并通知 dsh cancel，避免 agent 空跑
+        await turn_agen.aclose()
 
     answer = "".join(parts).strip() or final_response.strip()
     if not parts and answer:

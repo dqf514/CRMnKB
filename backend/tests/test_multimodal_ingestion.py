@@ -8,11 +8,16 @@ import app.services.ingestion as ingestion
 
 
 class _FakeSession:
-    def __init__(self, doc):
+    def __init__(self, doc, old_chunk_ids=(), lease_rowcount=1):
         self._doc = doc
         self.added = []
         self.committed = False
+        self.rolled_back = False
         self._next_id = 1
+        self.old_chunk_ids = list(old_chunk_ids)  # 模拟库里已存在的旧切片 id
+        # 解析租约条件 UPDATE 的受影响行数：1=抢到租约，0=租约被占用（模拟并发重解析）
+        self.lease_rowcount = lease_rowcount
+        self.executed = []  # 记录执行过的语句类型名（Select/Delete/TextClause），供顺序断言
 
     async def get(self, model, ident):
         return self._doc
@@ -31,8 +36,17 @@ class _FakeSession:
         return None
 
     async def execute(self, stmt, params=None):
-        # 清旧切片的 delete 语句与 tsvector UPDATE：fake 不需要真的删/改，吞掉即可
-        return None
+        # 清旧切片的 delete 语句与 tsvector UPDATE：fake 不需要真的删/改，吞掉即可；
+        # select 旧切片 id 时返回预设的 old_chunk_ids；
+        # 租约 UPDATE 经 rowcount 报告是否抢到
+        self.executed.append(type(stmt).__name__)
+        return SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: list(self.old_chunk_ids)),
+            rowcount=self.lease_rowcount,
+        )
+
+    async def rollback(self):
+        self.rolled_back = True
 
     async def commit(self):
         self.committed = True
@@ -385,6 +399,32 @@ async def test_recover_processing_documents(monkeypatch):
 
     monkeypatch.setattr(ingestion, "AsyncSessionLocal", lambda: _FakeSessionCtx(_Boom()))
     assert await ingestion.recover_processing_documents() == []
+
+
+# ---------------------------------------------------------------------------
+# 并发重解析互斥（解析租约）
+# ---------------------------------------------------------------------------
+
+async def test_process_document_skipped_when_lease_held(monkeypatch, tmp_path):
+    """租约被占用（条件 UPDATE 影响 0 行）时直接跳过：不取文档、不解析、不写切片。"""
+    img = tmp_path / "pic.png"
+    img.write_bytes(b"\x89PNG fake image bytes")
+    doc = _make_doc(img, "png")
+    vision = _FakeVision()
+    monkeypatch.setattr(ingestion.settings, "OCR_PROVIDER", "vision")
+
+    async def _resolve_vision(**kw):
+        return vision
+
+    monkeypatch.setattr(ingestion, "resolve_vision_llm", _resolve_vision)
+    session = _FakeSession(doc, lease_rowcount=0)  # 模拟另一入口正在解析同一文档
+    monkeypatch.setattr(ingestion, "AsyncSessionLocal", lambda: _FakeSessionCtx(session))
+
+    await ingestion.process_document(doc.id)
+
+    assert vision.calls == 0  # 未进入解析
+    assert session.added == []  # 未写切片
+    assert doc.status == "processing"  # 文档状态未被改动
 
 
 async def test_rescan_supported_files(monkeypatch):
@@ -835,3 +875,79 @@ async def test_vision_review_keeps_old_content_on_failure(monkeypatch, tmp_path)
     assert doc.content == "旧 OCR 内容"
     assert doc.chunk_count == 3  # 旧切片未清
     assert "超时" in doc.doc_metadata["vision_review_error"]
+
+
+async def test_vision_review_persists_new_before_deleting_old(monkeypatch, tmp_path):
+    """顺序保证：先查旧切片 id → 写新切片（tsvector UPDATE）→ 最后才删旧切片。"""
+    img = tmp_path / "letter.png"
+    img.write_bytes(b"\x89PNG fake")
+    doc = _make_doc(img, "png")
+    doc.status = "ready"
+    doc.doc_metadata = {"processing_method": "ocr"}
+    doc.content = "旧 OCR 内容"
+    doc.chunk_count = 2
+
+    vision = _FakeVision("视觉复核出的新文本")
+    session = _FakeSession(doc, old_chunk_ids=[11, 12])
+    monkeypatch.setattr(ingestion, "AsyncSessionLocal", lambda: _FakeSessionCtx(session))
+    monkeypatch.setattr("app.services.error_log.log_error", _noop_log)
+
+    async def _resolve_vision(**kw):
+        return vision
+
+    monkeypatch.setattr(ingestion, "resolve_vision_llm", _resolve_vision)
+
+    async def _resolve_embed(**kw):
+        return _FakeEmbed()
+
+    monkeypatch.setattr(ingestion, "resolve_embed_llm", _resolve_embed)
+
+    await ingestion.vision_review_document(doc.id)
+
+    assert doc.status == "ready"
+    assert doc.doc_metadata["vision_reviewed_at"]
+    kinds = session.executed
+    # 顺序：Select 旧切片 id 在最前；Delete 旧切片在新切片落库（tsvector UPDATE）之后
+    assert kinds[0] == "Select"
+    assert "Delete" in kinds and "TextClause" in kinds
+    assert kinds.index("Delete") > kinds.index("TextClause")
+    # 新切片已写入（added 里还有重解析前的版本快照，只数 DocumentChunk）
+    from app.models.chunk import DocumentChunk
+
+    assert sum(isinstance(o, DocumentChunk) for o in session.added) == 1
+    assert session.committed and not session.rolled_back
+
+
+async def test_vision_review_persist_failure_keeps_old_chunks(monkeypatch, tmp_path):
+    """写新切片中途失败（嵌入模型不可用）：整体回滚、不执行任何删旧切片语句，旧内容保留。"""
+    img = tmp_path / "letter.png"
+    img.write_bytes(b"\x89PNG fake")
+    doc = _make_doc(img, "png")
+    doc.status = "ready"
+    doc.doc_metadata = {"processing_method": "ocr"}
+    doc.content = "旧 OCR 内容"
+    doc.chunk_count = 3
+
+    vision = _FakeVision("视觉复核出的新文本")
+    session = _FakeSession(doc, old_chunk_ids=[11, 12, 13])
+    monkeypatch.setattr(ingestion, "AsyncSessionLocal", lambda: _FakeSessionCtx(session))
+    monkeypatch.setattr("app.services.error_log.log_error", _noop_log)
+
+    async def _resolve_vision(**kw):
+        return vision
+
+    monkeypatch.setattr(ingestion, "resolve_vision_llm", _resolve_vision)
+
+    async def _fail_embed(**kw):
+        raise RuntimeError("嵌入模型不可用")
+
+    monkeypatch.setattr(ingestion, "resolve_embed_llm", _fail_embed)
+
+    await ingestion.vision_review_document(doc.id)
+
+    assert "Delete" not in session.executed  # 未走到删旧切片
+    assert session.rolled_back  # 失败路径整体回滚
+    assert doc.status == "ready"
+    assert doc.content == "旧 OCR 内容"
+    assert doc.chunk_count == 3
+    assert "嵌入模型" in doc.doc_metadata["vision_review_error"]

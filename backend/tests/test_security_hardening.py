@@ -7,7 +7,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api import deps
 from app.api.auth import reset_login_rate_limit
-from app.core.security import create_access_token, hash_password
+from app.core.security import create_access_token, create_file_token, hash_password
 from app.database import get_db
 from app.main import app
 from app.services.reminder import match_due_soon_tasks
@@ -105,7 +105,7 @@ async def test_login_rate_limit_429_after_5_failures(client):
         yield db
 
     app.dependency_overrides[get_db] = _fake_db
-    # DB 限流：每次登录先消耗 2 条 scalar（账号+IP / IP 失败数），再 1 条 execute（用户查询）
+    # DB 限流：每次登录先消耗 2 条 scalar（账号维度 / IP 全局失败数），再 1 条 execute（用户查询）
     for _ in range(5):
         db.queue_scalar(0)
         db.queue_scalar(0)
@@ -114,11 +114,30 @@ async def test_login_rate_limit_429_after_5_failures(client):
             "/api/v1/auth/login", json={"username": "nobody", "password": "wrong"}
         )
         assert resp.status_code == 401
-    db.queue_scalar(5)  # 第 6 次：账号+IP 失败数达阈值 → 429
+    db.queue_scalar(5)  # 第 6 次：账号维度失败数达阈值 → 429
     resp = await client.post(
         "/api/v1/auth/login", json={"username": "nobody", "password": "wrong"}
     )
     assert resp.status_code == 429
+
+
+async def test_login_locked_by_username_regardless_of_ip(client):
+    """账号维度锁定不分 IP：同一 username 窗口内失败 5 次即锁，换 IP 无法绕过。"""
+    db = _FakeSession()
+
+    async def _fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _fake_db
+    # 该 username 15 分钟内已失败 5 次（无论来自哪些 IP）→ 直接锁定
+    db.queue_scalar(5)
+    resp = await client.post(
+        "/api/v1/auth/login", json={"username": "victim", "password": "wrong"}
+    )
+    assert resp.status_code == 429
+    # 锁定在账号维度触发：未再消耗 IP 维度查询，也未查用户表
+    assert not db._scalar_queue
+    assert not db._execute_queue
 
 
 async def test_login_success_clears_failures(client):
@@ -272,3 +291,76 @@ def test_should_run_naive_last_run_at_consistent():
     # daily：同一天的 last_run_at 不再触发，昨天则触发
     assert should_run("daily", {"time": "00:00"}, last, now) is False
     assert should_run("daily", {"time": "00:00"}, last - timedelta(days=1), now) is True
+
+
+# ---------------------------------------------------------------------------
+# 文件访问令牌（typ=file）：不能升格为 Bearer 登录令牌
+# ---------------------------------------------------------------------------
+
+async def test_file_token_rejected_as_bearer(client):
+    """文件令牌当 Bearer 调普通业务端点 → 401（防泄漏令牌升格为登录令牌）。"""
+    token = create_file_token(1, 1)
+
+    async def _fake_db():
+        yield _FakeSession()
+
+    app.dependency_overrides[get_db] = _fake_db
+    resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401
+    assert "文件直链" in resp.json()["detail"]
+
+
+async def test_file_token_query_param_still_works(client, tmp_path):
+    """文件令牌走 ?t= 文件内容直链仍放行（file 声明与路径 file_id 一致）。"""
+    path = tmp_path / "stored.bin"
+    path.write_bytes("你好".encode("utf-8"))
+    token = create_file_token(1, 1)
+    db = _FakeSession()
+    # _user_from_token 查用户 → _get_file_or_404 查文件（admin 绕过 ACL 不再查库）
+    db.queue_get(
+        SimpleNamespace(id=1, tenant_id=1, username="u", name="用户", role="admin", status=1)
+    )
+    db.queue_get(
+        SimpleNamespace(
+            id=1, tenant_id=1, file_name="a.txt", file_path=str(path), deleted_at=None
+        )
+    )
+
+    async def _fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _fake_db
+    resp = await client.get(f"/api/v1/library/files/1/content?t={token}")
+    assert resp.status_code == 200
+    assert resp.content == "你好".encode("utf-8")
+
+
+async def test_file_token_query_param_file_mismatch_403(client):
+    """文件令牌绑定的 file_id 与请求路径不一致 → 403。"""
+    token = create_file_token(2, 1)  # 令牌绑定文件 2，请求文件 1
+
+    async def _fake_db():
+        yield _FakeSession()
+
+    app.dependency_overrides[get_db] = _fake_db
+    resp = await client.get(f"/api/v1/library/files/1/content?t={token}")
+    assert resp.status_code == 403
+
+
+async def test_login_token_unaffected_by_file_token_check(client):
+    """正常登录 JWT（无 typ=file 声明）不受文件令牌拦截影响。"""
+    token = create_access_token(1, "admin")
+    db = _FakeSession()
+    db.queue_get(
+        SimpleNamespace(
+            id=1, tenant_id=1, username="admin", name="管理员", role="admin", status=1,
+            email=None, avatar_url=None,
+        )
+    )
+
+    async def _fake_db():
+        yield db
+
+    app.dependency_overrides[get_db] = _fake_db
+    resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200

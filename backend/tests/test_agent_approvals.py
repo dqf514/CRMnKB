@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import Update
 
 from app.api import deps
 from app.core.security import create_access_token, create_mcp_token
@@ -23,7 +24,12 @@ from app.models.skill import Skill as SkillRow
 from app.models.task import Task
 from app.models.user import User
 from app.services import agent_approvals as svc
-from app.services.agent_approvals import ApprovalError, create_approval, decide_approval
+from app.services.agent_approvals import (
+    ApprovalError,
+    create_approval,
+    decide_approval,
+    retry_approval,
+)
 
 
 def _user(uid=1, **kw):
@@ -56,8 +62,9 @@ def _approval(**kw):
 
 
 class _FakeResult:
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), rowcount=0):
         self._rows = list(rows)
+        self.rowcount = rowcount
 
     def scalars(self):
         return self
@@ -66,19 +73,44 @@ class _FakeResult:
         return self._rows
 
 
-class _FakeSession:
-    """队列式 fake session：execute 按序弹出预设结果；add 收集；flush 分配自增 id。"""
+class _FakeNested:
+    """begin_nested（SAVEPOINT）的假异步上下文管理器：记录进入/退出，不回滚。"""
 
-    def __init__(self, results=(), get_map=None):
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        self._session.nested_entered += 1
+        return self
+
+    async def __aexit__(self, exc_type, *args):
+        if exc_type is not None:
+            self._session.nested_rolled_back += 1
+        return False  # 异常继续抛给 decide_approval 收口
+
+
+class _FakeSession:
+    """队列式 fake session：execute 按序弹出预设结果；add 收集；flush 分配自增 id。
+
+    UPDATE 语句（条件 UPDATE 抢占）不消费结果队列，固定返回 update_rowcount，
+    便于用 update_rowcount=0 模拟并发抢占失败（影响行数为 0）。
+    """
+
+    def __init__(self, results=(), get_map=None, update_rowcount=1):
         self._results = list(results)
         self._get_map = dict(get_map or {})
+        self.update_rowcount = update_rowcount
         self.added: list = []
         self.statements: list = []
         self.committed = False
+        self.nested_entered = 0
+        self.nested_rolled_back = 0
         self._next_id = 100
 
     async def execute(self, stmt, *args, **kwargs):
         self.statements.append(stmt)
+        if isinstance(stmt, Update):
+            return _FakeResult(rowcount=self.update_rowcount)
         return _FakeResult(self._results.pop(0) if self._results else [])
 
     async def scalar(self, stmt, *args, **kwargs):
@@ -97,6 +129,9 @@ class _FakeSession:
             if getattr(obj, "id", None) is None:
                 obj.id = self._next_id
                 self._next_id += 1
+
+    def begin_nested(self):
+        return _FakeNested(self)
 
     async def commit(self):
         self.committed = True
@@ -180,26 +215,8 @@ async def test_decide_approve_followup_customer_missing_fails():
     assert not [o for o in db.added if isinstance(o, FollowUpRecord)]  # 未落库
 
 
-async def test_decide_approve_mail_smtp_unconfigured_fails(monkeypatch):
-    """SMTP 未配置：send_email 抛 RuntimeError，审批单落 failed 并写清 result。"""
-
-    async def _send(to, subject, body):
-        raise RuntimeError("SMTP 未配置")
-
-    monkeypatch.setattr(svc, "send_email", _send)
-    approval = _approval(
-        tool_name="mail_draft_create",
-        arguments={"customer_id": 5, "to": "a@b.com", "subject": "报价", "body": "正文"},
-    )
-    db = _FakeSession(get_map={(Customer, 5): _customer()})
-    await decide_approval(db, approval, _user(10, role="admin"), "approve")
-    assert approval.status == "failed"
-    assert "SMTP 未配置" in approval.result
-    notifications = [o for o in db.added if isinstance(o, Notification)]
-    assert "失败" in notifications[0].title
-
-
-async def test_decide_approve_mail_success(monkeypatch):
+async def test_decide_approve_mail_send_deferred_to_post_commit(monkeypatch):
+    """发邮件是外部副作用：decide 时不发，登记到 post_commit，commit 后由路由触发。"""
     sent: dict = {}
 
     async def _send(to, subject, body):
@@ -211,10 +228,86 @@ async def test_decide_approve_mail_success(monkeypatch):
         arguments={"customer_id": 5, "to": "a@b.com", "subject": "报价", "body": "正文"},
     )
     db = _FakeSession(get_map={(Customer, 5): _customer()})
-    await decide_approval(db, approval, _user(10, role="admin"), "approve")
-    assert approval.status == "executed"
-    assert "邮件已发送至 a@b.com" in approval.result
+    post_commit: list = []
+    await decide_approval(
+        db, approval, _user(10, role="admin"), "approve", post_commit=post_commit
+    )
+    assert approval.status == "executed"  # 发送后置，不再因 SMTP 故障翻 failed
+    assert "提交后发送" in approval.result
+    assert sent == {}  # decide 阶段未发送
+    assert len(post_commit) == 1
+    await post_commit[0]()  # 模拟路由在 commit 后触发
     assert sent == {"to": "a@b.com", "subject": "报价", "body": "正文"}
+
+
+async def test_decide_approve_mail_smtp_error_surfaces_in_hook(monkeypatch):
+    """SMTP 未配置：审批单正常 executed，错误在 post_commit 钩子里抛出（路由记日志）。"""
+
+    async def _send(to, subject, body):
+        raise RuntimeError("SMTP 未配置")
+
+    monkeypatch.setattr(svc, "send_email", _send)
+    approval = _approval(
+        tool_name="mail_draft_create",
+        arguments={"customer_id": 5, "to": "a@b.com", "subject": "报价", "body": "正文"},
+    )
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    post_commit: list = []
+    await decide_approval(
+        db, approval, _user(10, role="admin"), "approve", post_commit=post_commit
+    )
+    assert approval.status == "executed"
+    with pytest.raises(RuntimeError, match="SMTP 未配置"):
+        await post_commit[0]()
+
+
+async def test_decide_concurrent_claim_rowcount_zero():
+    """并发抢占：条件 UPDATE 影响行数为 0（已被另一请求处理）→ 409，不执行副作用。"""
+    approval = _approval()
+    db = _FakeSession(
+        get_map={(Customer, 5): _customer()},
+        update_rowcount=0,  # 模拟并发请求已把 pending 翻走
+    )
+    with pytest.raises(ApprovalError, match="已处理"):
+        await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "pending"  # 未翻状态
+    assert not [o for o in db.added if isinstance(o, FollowUpRecord)]  # 未执行副作用
+    assert not [o for o in db.added if isinstance(o, (Notification, AuditLog))]
+
+
+async def test_decide_approve_followup_triggers_post_commit_hooks(monkeypatch):
+    """跟进审批执行后登记与手动路径一致的后置钩子（AI 摘要/任务抽取/简报刷新）。"""
+    called: list[tuple] = []
+
+    async def _fake_hooks(record_id, customer_id):
+        called.append((record_id, customer_id))
+
+    monkeypatch.setattr(svc, "run_after_followup_created", _fake_hooks)
+    approval = _approval()
+    db = _FakeSession(get_map={(Customer, 5): _customer()})
+    post_commit: list = []
+    await decide_approval(
+        db, approval, _user(10, role="admin"), "approve", post_commit=post_commit
+    )
+    assert approval.status == "executed"
+    assert db.nested_entered == 1  # 执行包在 SAVEPOINT 里
+    record = [o for o in db.added if isinstance(o, FollowUpRecord)][0]
+    assert len(post_commit) == 1
+    await post_commit[0]()  # 模拟路由在 commit 后触发
+    assert called == [(record.id, 5)]
+
+
+async def test_decide_approve_executor_failure_clears_hooks(monkeypatch):
+    """执行失败：post_commit 钩子作废（不能对未落库的数据跑副作用）。"""
+    approval = _approval()
+    db = _FakeSession(get_map={})  # 客户不存在 → 执行器抛错
+    post_commit: list = []
+    await decide_approval(
+        db, approval, _user(10, role="admin"), "approve", post_commit=post_commit
+    )
+    assert approval.status == "failed"
+    assert db.nested_rolled_back == 1  # SAVEPOINT 回滚
+    assert post_commit == []
 
 
 async def test_decide_non_pending_rejected():
@@ -384,6 +477,70 @@ async def test_decide_approve_create_task_without_customer():
     assert approval.status == "executed"
     tasks = [o for o in db.added if isinstance(o, Task)]
     assert tasks[0].customer_id is None
+
+
+async def test_decide_approve_create_task_due_offset_to_utc():
+    """带时区偏移的 due_date 统一转 naive UTC（与 schemas/task.py 同款口径）。"""
+    approval = _approval(
+        tool_name="crm_create_task",
+        arguments={"title": "拜访", "due_date": "2026-10-01T09:00:00+08:00"},
+    )
+    db = _FakeSession()
+    await decide_approval(db, approval, _user(10, role="admin"), "approve")
+    assert approval.status == "executed"
+    t = [o for o in db.added if isinstance(o, Task)][0]
+    assert t.due_date == datetime(2026, 10, 1, 1, 0)  # 09:00+08:00 = 01:00 UTC
+    assert t.due_date.tzinfo is None
+
+
+# ---------------------------------------------------------------------------
+# 服务层：failed 审批单重试
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_failed_approval_executes():
+    approval = _approval(status="failed", result="ApprovalError: 客户不存在或已删除")
+    db = _FakeSession(get_map={(Customer, 5): _customer()})  # 这次客户存在了
+    await retry_approval(db, approval, _user(10, role="admin"))
+    assert approval.status == "executed"
+    assert "跟进记录已写入" in approval.result
+    assert [o for o in db.added if isinstance(o, FollowUpRecord)]
+    assert db.nested_entered == 1  # 执行包在 SAVEPOINT 里
+    actions = [o.action for o in db.added if isinstance(o, AuditLog)]
+    assert actions == ["retry", "execute"]
+    notifications = [o for o in db.added if isinstance(o, Notification)]
+    assert len(notifications) == 1 and "重试" in notifications[0].title
+
+
+async def test_retry_non_failed_rejected():
+    for status in ("pending", "executed", "rejected"):
+        with pytest.raises(ApprovalError, match="失败"):
+            await retry_approval(_FakeSession(), _approval(status=status), _user(10, role="admin"))
+
+
+async def test_retry_concurrent_claim_rowcount_zero():
+    """并发重试：条件 UPDATE 影响行数为 0 → 409，不执行副作用。"""
+    approval = _approval(status="failed")
+    db = _FakeSession(
+        get_map={(Customer, 5): _customer()},
+        update_rowcount=0,  # 模拟并发请求已把 failed 翻走
+    )
+    with pytest.raises(ApprovalError, match="并发"):
+        await retry_approval(db, approval, _user(10, role="admin"))
+    assert approval.status == "failed"  # 内存状态未被改动
+    assert not [o for o in db.added if isinstance(o, (FollowUpRecord, Notification, AuditLog))]
+
+
+async def test_retry_still_failing_stays_failed():
+    """重试仍失败：落回 failed（可再次重试），post_commit 钩子作废。"""
+    approval = _approval(status="failed")
+    db = _FakeSession(get_map={})  # 客户仍不存在 → 执行器抛错
+    post_commit: list = []
+    await retry_approval(db, approval, _user(10, role="admin"), post_commit=post_commit)
+    assert approval.status == "failed"
+    assert "客户不存在" in approval.result
+    assert db.nested_rolled_back == 1  # SAVEPOINT 回滚
+    assert post_commit == []
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +741,7 @@ async def test_decide_endpoint_reject_happy_path(client):
 
 
 async def test_decide_endpoint_approve_with_patched_executor(client, monkeypatch):
-    async def _exec(db, approval):
+    async def _exec(db, approval, post_commit):
         return "执行完成"
 
     monkeypatch.setattr(svc, "execute_approval", _exec)
@@ -622,6 +779,63 @@ async def test_decide_endpoint_cross_tenant_404(client):
     resp = await client.post(
         "/api/v1/agent-approvals/7/decide",
         json={"decision": "approve"},
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# API 层：failed 审批单重试
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_endpoint_requires_admin(client):
+    _override_db(_FakeSession())
+    _override_user(_user(1, role="member"))
+    resp = await client.post(
+        "/api/v1/agent-approvals/7/retry",
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_retry_endpoint_happy_path(client, monkeypatch):
+    async def _exec(db, approval, post_commit):
+        return "执行完成"
+
+    monkeypatch.setattr(svc, "execute_approval", _exec)
+    approval = _approval(status="failed", result="ApprovalError: x")
+    db = _FakeSession(get_map={(AgentApproval, 7): approval})
+    _override_db(db)
+    _override_user(_user(10, role="admin"))
+    resp = await client.post(
+        "/api/v1/agent-approvals/7/retry",
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "executed"
+    assert data["result"] == "执行完成"
+    assert db.committed
+
+
+async def test_retry_endpoint_non_failed_409(client):
+    db = _FakeSession(get_map={(AgentApproval, 7): _approval(status="executed")})
+    _override_db(db)
+    _override_user(_user(10, role="admin"))
+    resp = await client.post(
+        "/api/v1/agent-approvals/7/retry",
+        headers={"Authorization": "Bearer x"},
+    )
+    assert resp.status_code == 409
+
+
+async def test_retry_endpoint_cross_tenant_404(client):
+    db = _FakeSession(get_map={(AgentApproval, 7): _approval(tenant_id=2, status="failed")})
+    _override_db(db)
+    _override_user(_user(10, role="admin"))
+    resp = await client.post(
+        "/api/v1/agent-approvals/7/retry",
         headers={"Authorization": "Bearer x"},
     )
     assert resp.status_code == 404

@@ -1,0 +1,6 @@
+# 开发/测试依赖：首行引入运行时依赖，CI 与本地开发只需安装本文件
+# （生产镜像 Dockerfile 只装 requirements.txt，不含以下测试工具）
+-r requirements.txt
+
+pytest==8.*
+pytest-asyncio==0.26.*

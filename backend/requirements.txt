@@ -1,5 +1,6 @@
-fastapi==0.115.*
-uvicorn[standard]==0.30.*
+# 运行时依赖（生产镜像只装本文件）；pytest 等测试依赖在 requirements-dev.txt
+fastapi==0.142.*
+uvicorn[standard]==0.54.*
 sqlalchemy[asyncio]==2.0.*
 asyncpg==0.30.*
 pgvector==0.3.*
@@ -8,11 +9,9 @@ pydantic-settings==2.*
 PyJWT==2.*
 pwdlib[bcrypt]==0.2.*
 httpx==0.28.*
-pypdf==5.*
+pypdf>=6.19,<7  # 6.19 修复 5.x 系列已知 CVE，>=6.19 为安全下限
 python-docx==1.1.*
 python-multipart==0.0.*
-pytest==8.*
-pytest-asyncio==0.26.*
 psutil==6.*
 openpyxl==3.1.*
 pymupdf==1.*
@@ -22,8 +21,9 @@ xlrd==2.*
 python-pptx==1.*
 olefile==0.47.*  # 老 Office 二进制（.doc/.ppt）OLE 复合文档解析
 mcp>=1.8,<2
-# MCP 依赖的 sse-starlette 新版要求 starlette>=0.49，与 fastapi 0.115 不兼容；钉旧版
-sse-starlette<3
+# sse-starlette 3.x 要求 starlette>=0.49（旧 fastapi 0.115 不兼容曾钉 <3）；
+# fastapi 升到 0.142 后 starlette 约束已放开，随 MCP 依赖解析到 3.x（当前 3.5.0 + starlette 1.7）
+sse-starlette>=3,<4
 # 可选：本地 OCR（RapidOCR，图片/扫描 PDF 三级递进中的"OCR"级）。
 # 未安装时自动回退视觉模型，不阻塞主流程；需系统装 opencv/onnxruntime 依赖
 rapidocr_onnxruntime

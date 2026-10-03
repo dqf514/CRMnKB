@@ -30,6 +30,19 @@ def _today_range() -> tuple[datetime, datetime]:
     return datetime.combine(today, time.min), datetime.combine(today, time.max)
 
 
+def _local_today_range() -> tuple[datetime, datetime]:
+    """服务器本地"今日"00:00 ~ 23:59 对应的 naive UTC 区间（与库中 TIMESTAMP 列一致）。
+
+    晨报等按本地时间触发的功能，统计口径也要按本地日界，与触发基准统一。"""
+    now_local = datetime.now(timezone.utc).astimezone()
+    start = datetime.combine(now_local.date(), time.min, tzinfo=now_local.tzinfo)
+    end = datetime.combine(now_local.date(), time.max, tzinfo=now_local.tzinfo)
+    return (
+        start.astimezone(timezone.utc).replace(tzinfo=None),
+        end.astimezone(timezone.utc).replace(tzinfo=None),
+    )
+
+
 async def today_overview(db: AsyncSession, user: User) -> dict:
     start, end = _today_range()
     now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -241,7 +254,8 @@ async def send_morning_briefs() -> int:
     if (now_local.hour, now_local.minute) < (8, 30):
         return 0
     today_local = now_local.date()
-    start, end = _today_range()
+    # 统计口径与触发基准统一：本地日界换算成 naive UTC 区间（库中 TIMESTAMP 列为 naive UTC）
+    start, end = _local_today_range()
     sent = 0
     async with AsyncSessionLocal() as db:
         users = (

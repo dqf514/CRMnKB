@@ -22,6 +22,7 @@ from app.schemas.report import (
 )
 from app.services.audit import record_audit
 from app.services.pdf import render_pdf_from_html, render_presentation_pdf
+from app.services.permissions import accessible_ids, filter_accessible_ids
 from app.services.report import (
     REPORT_TYPES,
     default_date_range,
@@ -101,6 +102,13 @@ async def generate(
             )
             if found != set(kb_ids):
                 raise HTTPException(status_code=400, detail="存在无权访问或已删除的知识库")
+            # 用户级 ACL：过滤掉当前用户不可读的知识库，全部不可读则拒绝
+            kb_ids = await filter_accessible_ids(db, user, "kb", kb_ids)
+            if not kb_ids:
+                raise HTTPException(status_code=400, detail="所选知识库均无阅读权限")
+        else:
+            # 未指定时限定为"当前用户可读的知识库"，而非全租户
+            kb_ids = await accessible_ids(db, user, "kb")
         file_ids = sorted(set(body.file_ids or []))
         if file_ids:
             found_files = set(
@@ -118,6 +126,10 @@ async def generate(
             )
             if found_files != set(file_ids):
                 raise HTTPException(status_code=400, detail="存在无权访问或已删除的文件")
+            # 用户级 ACL：过滤掉当前用户不可读的文件，全部不可读则拒绝
+            file_ids = await filter_accessible_ids(db, user, "file", file_ids)
+            if not file_ids:
+                raise HTTPException(status_code=400, detail="所选文件均无阅读权限")
         params = {
             "prompt": prompt,
             "kb_ids": kb_ids,
@@ -174,15 +186,21 @@ async def list_reports(
     user: User = Depends(get_current_user),
 ):
     stmt = select(Report).where(Report.tenant_id == user.tenant_id)
+    # 报告按属主隔离：非 admin 仅能看到自己的报告（admin 绕过，与全局 ACL 口径一致）
+    if user.role != "admin":
+        stmt = stmt.where(Report.user_id == user.id)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     stmt = stmt.order_by(Report.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(stmt)
     return ReportListOut(items=result.scalars().all(), total=total or 0)
 
 
-async def _get_report_or_404(db: AsyncSession, tenant_id: int, report_id: int) -> Report:
+async def _get_report_or_404(db: AsyncSession, user: User, report_id: int) -> Report:
     report = await db.get(Report, report_id)
-    if report is None or report.tenant_id != tenant_id:
+    if report is None or report.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    # 非 admin 仅本人可见/可操作，他人报告按不存在处理（不暴露存在性）
+    if user.role != "admin" and report.user_id != user.id:
         raise HTTPException(status_code=404, detail="报告不存在")
     return report
 
@@ -193,7 +211,7 @@ async def get_report(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await _get_report_or_404(db, user.tenant_id, report_id)
+    return await _get_report_or_404(db, user, report_id)
 
 
 @router.delete("/{report_id}", status_code=204)
@@ -202,7 +220,7 @@ async def delete_report(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    report = await _get_report_or_404(db, user.tenant_id, report_id)
+    report = await _get_report_or_404(db, user, report_id)
     await db.delete(report)
     await db.commit()
 
@@ -214,7 +232,7 @@ async def download_pdf(
     user: User = Depends(get_current_user),
 ):
     """HTML 报告导出 A4 PDF（Playwright 服务端打印）。仅 format=html 且 ready 可用。"""
-    report = await _get_report_or_404(db, user.tenant_id, report_id)
+    report = await _get_report_or_404(db, user, report_id)
     if report.format != "html":
         raise HTTPException(status_code=400, detail="仅 HTML 报告支持导出 PDF")
     if report.status != "ready":
@@ -242,7 +260,7 @@ async def download_presentation_pdf(
     user: User = Depends(get_current_user),
 ):
     """演示版（16:9 幻灯片）导出横向 PDF，一页一幻灯片。需已生成演示版。"""
-    report = await _get_report_or_404(db, user.tenant_id, report_id)
+    report = await _get_report_or_404(db, user, report_id)
     pres = (report.params or {}).get("presentation_html")
     if not pres:
         raise HTTPException(status_code=400, detail="该报告暂无演示版，请重新生成")
@@ -271,7 +289,7 @@ async def revise(
     user: User = Depends(get_current_user),
 ):
     """对话式修改：仅 custom 类型且 status=ready 可改，后台任务 revise_report 执行。"""
-    report = await _get_report_or_404(db, user.tenant_id, report_id)
+    report = await _get_report_or_404(db, user, report_id)
     if report.type != "custom":
         raise HTTPException(status_code=400, detail="仅自定义报告支持对话式修改")
     if report.status != "ready":

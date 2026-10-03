@@ -5,7 +5,7 @@ from pathlib import Path
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +20,7 @@ from app.schemas.auth import (
     LoginRequest,
     PasswordChange,
     PhoneLoginRequest,
+    PreferencesUpdate,
     ProfileUpdate,
     SmsCodeRequest,
     SsoExchangeRequest,
@@ -43,7 +44,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# 登录限流（DB 持久，跨 worker 生效）：账号+IP 15 分钟失败 5 次锁定；IP 全局 20 次熔断
+# 登录限流（DB 持久，跨 worker 生效）：
+# - 账号维度：同一 username 不分 IP，15 分钟失败 5 次锁定（防换 IP 绕过单账号锁定）
+# - IP 全局：同一 IP 15 分钟失败 20 次熔断
 _LOGIN_MAX_FAILURES = 5
 _LOGIN_LOCK_SECONDS = 15 * 60
 _IP_MAX_FAILURES = 20
@@ -62,7 +65,8 @@ async def _count_failures(db: AsyncSession, *, username: str | None = None, ip: 
 
 
 async def _check_login_rate_limit(db: AsyncSession, username: str, ip: str) -> None:
-    if await _count_failures(db, username=username, ip=ip) >= _LOGIN_MAX_FAILURES:
+    # 账号维度不分 IP（换 IP 不能绕过单账号锁定）；该维度计数天然覆盖「账号+IP」组合
+    if await _count_failures(db, username=username) >= _LOGIN_MAX_FAILURES:
         raise HTTPException(status_code=429, detail="失败次数过多，账号已临时锁定，请 15 分钟后再试")
     if await _count_failures(db, ip=ip) >= _IP_MAX_FAILURES:
         raise HTTPException(status_code=429, detail="失败次数过多，请稍后再试")
@@ -73,11 +77,8 @@ async def _record_login_failure(db: AsyncSession, username: str, ip: str) -> Non
 
 
 async def _clear_login_failures(db: AsyncSession, username: str, ip: str) -> None:
-    await db.execute(
-        delete(LoginAttempt).where(
-            LoginAttempt.username == username, LoginAttempt.ip == ip
-        )
-    )
+    # 登录成功后清空该账号全部失败记录（不限 IP），与账号维度锁定口径一致
+    await db.execute(delete(LoginAttempt).where(LoginAttempt.username == username))
 
 
 def reset_login_rate_limit() -> None:
@@ -181,6 +182,9 @@ async def me(user: User = Depends(get_current_user)):
 
 
 # ---- SSO 免登（同步 App「打开网页版」用）：长效 token 换 60 秒一次性 code ----
+# 注意：code 存模块级内存字典，仅单 worker 部署有效（多 worker 时签发与兑换可能落在
+# 不同进程而失败；本项目生产为单 worker uvicorn，可接受，不引 Redis）。
+# 安全性：60 秒过期（签发时顺带清理过期项）、消费即删（pop）一次性使用。
 _SSO_CODES: dict[str, tuple[int, float]] = {}  # code -> (user_id, 过期时间戳)
 
 
@@ -198,7 +202,9 @@ async def issue_sso_code(user: User = Depends(get_current_user)):
 
 
 @router.post("/sso-exchange", response_model=TokenResponse)
-async def sso_exchange(body: SsoExchangeRequest, db: AsyncSession = Depends(get_db)):
+async def sso_exchange(
+    body: SsoExchangeRequest, request: Request, db: AsyncSession = Depends(get_db)
+):
     """一次性 code 换正式 JWT（消费即失效）。"""
     entry = _SSO_CODES.pop(body.code, None)
     if entry is None or entry[1] < time.time():
@@ -206,6 +212,9 @@ async def sso_exchange(body: SsoExchangeRequest, db: AsyncSession = Depends(get_
     user = await db.get(User, entry[0])
     if user is None or getattr(user, "status", 1) == 0:
         raise HTTPException(status_code=403, detail="账号不可用")
+    ip = request.client.host if request.client else "unknown"
+    record_audit(db, user, "login", "user", user.id, {"ok": True, "via": "sso"}, ip)
+    await db.commit()
     token = create_access_token(user.id, user.username)
     return TokenResponse(
         access_token=token,
@@ -299,6 +308,7 @@ async def upload_avatar(
 @router.put("/password", status_code=204)
 async def change_password(
     body: PasswordChange,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -307,6 +317,10 @@ async def change_password(
     user.password_hash = hash_password(body.new_password)
     # 改密后旧 JWT 失效（deps 校验 iat 不早于该时间）
     user.password_changed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    # 首登强制改密标记解除
+    user.must_change_password = False
+    ip = request.client.host if request.client else "unknown"
+    record_audit(db, user, "change_password", "user", user.id, None, ip)
     await db.commit()
 
 
@@ -317,12 +331,13 @@ async def get_preferences(user: User = Depends(get_current_user)):
 
 @router.put("/preferences")
 async def put_preferences(
-    body: dict = Body(...),
+    body: PreferencesUpdate,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """整体覆盖保存 preferences（前端存主题等设置）。JSONB 需重新赋值触发变更检测。"""
-    user.preferences = body
+    """整体覆盖保存 preferences（前端存主题等设置）。JSONB 需重新赋值触发变更检测。
+    体积上限校验在 schema（序列化后 >16KB 返回 422）。"""
+    user.preferences = body.root
     await db.commit()
     return user.preferences
 

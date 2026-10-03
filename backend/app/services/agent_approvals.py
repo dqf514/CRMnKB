@@ -4,14 +4,19 @@
 admin 在 /agent-approvals/{id}/decide 批准后由本模块同步执行对应动作
 （执行器按 tool_name 分发）。审批与执行全程记审计日志、发站内通知。
 
-执行器约定：先做全部校验再落库（decide 与执行共用同一事务，校验失败时
-不能把半截数据留在 session 里随 commit 写入）。
+并发与事务约定：
+- 状态翻转走条件 UPDATE（WHERE status='pending'）抢占，并发审批只有一个
+  请求能翻走状态，其余报 409，杜绝重复执行副作用；
+- approve 的执行包在 SAVEPOINT（begin_nested）里，中途失败回滚半截副作用，
+  保证审批单状态（failed）与业务数据一致；
+- 外部副作用（发邮件、跟进 AI 钩子）不入库执行，收集到 post_commit 列表，
+  由调用方在 commit 成功后触发（钩子另开会话读库，必须在提交后运行）。
 """
 import logging
 import re
 from datetime import date, datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_approval import AgentApproval
@@ -24,7 +29,9 @@ from app.models.task import Task
 from app.models.user import User
 from app.services.audit import record_audit
 from app.services.email import send_email
+from app.services.followup_hooks import run_after_followup_created
 from app.services.skills.builtin import BUILTIN_SKILLS
+from app.schemas.task import _to_naive_utc
 
 logger = logging.getLogger(__name__)
 
@@ -128,10 +135,13 @@ async def create_approval(
 
 # ---------------------------------------------------------------------------
 # 执行器：按 tool_name 分发，返回人话执行结果（写 approval.result）
+# post_commit：外部副作用回调列表，由调用方在事务 commit 成功后逐个触发
 # ---------------------------------------------------------------------------
 
 
-async def _exec_crm_add_followup(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+async def _exec_crm_add_followup(
+    db: AsyncSession, approval: AgentApproval, args: dict, post_commit: list
+) -> str:
     customer_id = int(args.get("customer_id") or 0)
     customer = await db.get(Customer, customer_id)
     if (
@@ -156,10 +166,16 @@ async def _exec_crm_add_followup(db: AsyncSession, approval: AgentApproval, args
     )
     db.add(record)
     await db.flush()  # 取 record.id 写进执行结果
+    # 与手动创建跟进一致的后置钩子（AI 摘要/任务抽取/客户简报刷新）；
+    # 钩子另开会话读库，必须在 commit 后触发，故挂到 post_commit
+    record_id, cid = record.id, customer.id
+    post_commit.append(lambda: run_after_followup_created(record_id, cid))
     return f"跟进记录已写入（id={record.id}，客户「{customer.name}」）"
 
 
-async def _exec_mail_draft_create(db: AsyncSession, approval: AgentApproval, args: dict) -> str:
+async def _exec_mail_draft_create(
+    db: AsyncSession, approval: AgentApproval, args: dict, post_commit: list
+) -> str:
     to = (args.get("to") or "").strip()
     subject = (args.get("subject") or "").strip()
     body = args.get("body") or ""
@@ -170,10 +186,10 @@ async def _exec_mail_draft_create(db: AsyncSession, approval: AgentApproval, arg
         customer = await db.get(Customer, int(customer_id))
         if customer is None or customer.tenant_id != approval.tenant_id:
             raise ApprovalError("客户不存在")
-    # SMTP 未配置时 send_email 抛 RuntimeError("SMTP 未配置")，
-    # 由 decide_approval 收口为 failed 并写入 result
-    await send_email(to, subject, body)
-    return f"邮件已发送至 {to}（主题「{subject}」）"
+    # 发邮件是外部副作用，移到 commit 成功后执行（SMTP 故障不再翻转审批单
+    # 状态，由路由层记日志）；这里只做静态校验并登记回调
+    post_commit.append(lambda: send_email(to, subject, body))
+    return f"邮件已批准，提交后发送至 {to}（主题「{subject}」）"
 
 
 # ---------------------------------------------------------------------------
@@ -322,7 +338,9 @@ async def _exec_crm_create_task(db: AsyncSession, approval: AgentApproval, args:
     due: datetime | None = None
     if due_raw:
         try:
-            due = datetime.fromisoformat(due_raw.replace("Z", "+00:00")).replace(tzinfo=None)
+            # aware ISO 统一转 naive UTC（与 schemas/task.py 的 TaskCreate 校验同款口径），
+            # 避免带偏移的时间被直接丢弃时区导致偏差
+            due = _to_naive_utc(datetime.fromisoformat(due_raw.replace("Z", "+00:00")))
         except ValueError:
             raise ApprovalError(f"截止日期格式非法：{due_raw}") from None
     task = Task(
@@ -409,13 +427,17 @@ async def _exec_skill_create_api(db: AsyncSession, approval: AgentApproval, args
     return f"API 工具已创建并启用（name={name}，{method} {url}；agent 可用 skill_call 调用）"
 
 
-async def execute_approval(db: AsyncSession, approval: AgentApproval) -> str:
-    """按 tool_name 分发执行已批准的动作，返回执行结果文本。"""
+async def execute_approval(db: AsyncSession, approval: AgentApproval, post_commit: list) -> str:
+    """按 tool_name 分发执行已批准的动作，返回执行结果文本。
+
+    post_commit：执行器登记的外部副作用回调（发邮件、跟进 AI 钩子等），
+    由调用方在 commit 成功后触发。
+    """
     args = approval.arguments or {}
     if approval.tool_name == "crm_add_followup":
-        return await _exec_crm_add_followup(db, approval, args)
+        return await _exec_crm_add_followup(db, approval, args, post_commit)
     if approval.tool_name == "mail_draft_create":
-        return await _exec_mail_draft_create(db, approval, args)
+        return await _exec_mail_draft_create(db, approval, args, post_commit)
     if approval.tool_name == "crm_create_customer":
         return await _exec_crm_create_customer(db, approval, args)
     if approval.tool_name == "crm_update_customer":
@@ -437,20 +459,43 @@ async def decide_approval(
     decider: User,
     decision: str,
     reason: str | None = None,
+    post_commit: list | None = None,
 ) -> AgentApproval:
-    """审批状态流转（调用方负责 commit）。
+    """审批状态流转（调用方负责 commit，并在 commit 后触发 post_commit 回调）。
 
     reject → rejected；approve → 同步执行，成功 executed、失败 failed
     （失败原因写 result，不向审批人抛错）。结果通知发起人。
+
+    并发安全：状态翻转用条件 UPDATE（WHERE status='pending'）抢占——两个
+    admin 同时审批时只有一个请求影响行数为 1，另一个报 409，不会重复执行
+    副作用。执行包在 SAVEPOINT 里：中途失败回滚半截落库，审批单落 failed，
+    业务数据与状态保持一致。
     """
     if approval.status != "pending":
         raise ApprovalError("审批单已处理，不能重复审批")
+    # 条件 UPDATE 抢占 pending → 目标状态；影响行数为 0 说明已被并发请求处理
+    now = _utcnow()
+    claimed = "rejected" if decision == "reject" else "approved"
+    result = await db.execute(
+        update(AgentApproval)
+        .where(AgentApproval.id == approval.id, AgentApproval.status == "pending")
+        .values(
+            status=claimed,
+            decided_by=decider.id,
+            decided_at=now,
+            decision_reason=reason,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        raise ApprovalError("审批单已处理，不能重复审批")
+    # synchronize_session=False 不回写已加载的 ORM 实例，手动同步内存状态
+    approval.status = claimed
     approval.decided_by = decider.id
-    approval.decided_at = _utcnow()
+    approval.decided_at = now
     approval.decision_reason = reason
 
     if decision == "reject":
-        approval.status = "rejected"
         record_audit(
             db, decider, "reject", "agent_approval", approval.id,
             {"tool_name": approval.tool_name, "reason": reason},
@@ -467,19 +512,79 @@ async def decide_approval(
         db, decider, "approve", "agent_approval", approval.id,
         {"tool_name": approval.tool_name},
     )
-    approval.status = "approved"
+    hooks = post_commit if post_commit is not None else []
     try:
-        approval.result = await execute_approval(db, approval)
+        # SAVEPOINT：执行中途失败回滚半截副作用（如已 flush 的半截记录），
+        # 外层的审批单状态翻转与审计不受影响，随外层事务正常提交
+        async with db.begin_nested():
+            approval.result = await execute_approval(db, approval, hooks)
         approval.status = "executed"
     except Exception as exc:
         approval.status = "failed"
         approval.result = f"{type(exc).__name__}: {exc}"
+        hooks.clear()  # 执行失败：已登记的 post_commit 副作用一并作废
         logger.warning("审批单 %s 执行失败: %s", approval.id, exc)
     record_audit(
         db, decider, "execute", "agent_approval", approval.id,
         {"status": approval.status, "result": approval.result},
     )
     title = "Agent 审批已通过并执行" if approval.status == "executed" else "Agent 审批通过但执行失败"
+    await _notify(
+        db, approval.tenant_id, approval.requester_user_id,
+        title,
+        f"{approval.summary}\n结果：{approval.result}",
+        approval.id,
+    )
+    return approval
+
+
+async def retry_approval(
+    db: AsyncSession,
+    approval: AgentApproval,
+    actor: User,
+    post_commit: list | None = None,
+) -> AgentApproval:
+    """重试执行失败的审批单（仅 failed 态；调用方负责 commit 并触发 post_commit）。
+
+    与 decide_approval 的 approve 分支同模式：条件 UPDATE（WHERE status='failed'）
+    抢占防并发重试重复执行；执行包在 SAVEPOINT 里，失败仍落 failed 可再次重试。
+    """
+    if approval.status != "failed":
+        raise ApprovalError("仅执行失败的审批单可重试")
+    now = _utcnow()
+    result = await db.execute(
+        update(AgentApproval)
+        .where(AgentApproval.id == approval.id, AgentApproval.status == "failed")
+        .values(status="approved", decided_by=actor.id, decided_at=now)
+        .execution_options(synchronize_session=False)
+    )
+    if result.rowcount != 1:
+        raise ApprovalError("审批单已被并发重试处理")
+    # synchronize_session=False 不回写已加载的 ORM 实例，手动同步内存状态
+    approval.status = "approved"
+    approval.decided_by = actor.id
+    approval.decided_at = now
+
+    record_audit(
+        db, actor, "retry", "agent_approval", approval.id,
+        {"tool_name": approval.tool_name},
+    )
+    hooks = post_commit if post_commit is not None else []
+    try:
+        # SAVEPOINT：执行中途失败回滚半截副作用，审批单落 failed 可再次重试
+        async with db.begin_nested():
+            approval.result = await execute_approval(db, approval, hooks)
+        approval.status = "executed"
+    except Exception as exc:
+        approval.status = "failed"
+        approval.result = f"{type(exc).__name__}: {exc}"
+        hooks.clear()  # 执行失败：已登记的 post_commit 副作用一并作废
+        logger.warning("审批单 %s 重试执行失败: %s", approval.id, exc)
+    record_audit(
+        db, actor, "execute", "agent_approval", approval.id,
+        {"status": approval.status, "result": approval.result},
+    )
+    title = "Agent 审批重试执行成功" if approval.status == "executed" else "Agent 审批重试仍失败"
     await _notify(
         db, approval.tenant_id, approval.requester_user_id,
         title,

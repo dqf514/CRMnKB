@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 TRIGGER_TYPES = {"interval", "daily", "weekly", "birthday", "condition"}
 ACTION_TYPES = {"send_email", "create_task", "create_notification"}
 
+# run_workflow 客户扫描分批大小（keyset 分页，避免租户客户全表一次性载入内存）
+_CUSTOMER_BATCH_SIZE = 500
+
 # conditions DSL 白名单（作用于 customers 表字段，防注入）
 CONDITION_FIELDS = {"name", "industry", "status", "source", "phone", "email"}
 CONDITION_OPS = {"eq", "ne", "contains", "gt", "lt"}
@@ -29,31 +32,61 @@ def _parse_hhmm(value: str) -> time:
     return time(int(hour), int(minute))
 
 
+def _to_local(now: datetime) -> datetime:
+    """统一时区基准：aware 直转服务器本地时间；naive 按项目约定视为 UTC 再转本地。"""
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone()
+
+
+def _local_day_start_utc(now: datetime) -> datetime:
+    """服务器本地"今日"00:00 对应的 naive UTC 时间（与库中 naive TIMESTAMP 列比较用）。"""
+    local = _to_local(now)
+    start = datetime.combine(local.date(), time.min, tzinfo=local.tzinfo)
+    return start.astimezone(timezone.utc).replace(tzinfo=None)
+
+
 def should_run(
     trigger_type: str, trigger_config: dict, last_run_at: datetime | None, now: datetime
 ) -> bool:
-    """判断工作流本轮是否该触发。纯函数（now/last_run_at 需同为 aware 或同为 naive）。"""
+    """判断工作流本轮是否该触发。纯函数。
+
+    时区基准：daily/weekly 的 time/weekday 按**服务器本地时间**解释（配置 09:00
+    即本地 09:00 触发，与晨报口径一致）；now/last_run_at 可为 naive（视为 UTC）
+    或 aware。interval 只比较时间差，与时区无关。"""
     if trigger_type == "interval":
         minutes = int(trigger_config.get("interval_minutes", 60))
         return last_run_at is None or (now - last_run_at) >= timedelta(minutes=minutes)
     if trigger_type == "daily":
         t = _parse_hhmm(trigger_config.get("time", "09:00"))
-        return now.time() >= t and (last_run_at is None or last_run_at.date() < now.date())
+        now_local = _to_local(now)
+        last_local = _to_local(last_run_at).date() if last_run_at is not None else None
+        return now_local.time() >= t and (last_local is None or last_local < now_local.date())
     if trigger_type == "weekly":
-        weekday = int(trigger_config.get("weekday", 1))  # 1-7
+        weekday = int(trigger_config.get("weekday", 1))  # 1-7（本地时间的星期）
         t = _parse_hhmm(trigger_config.get("time", "09:00"))
+        now_local = _to_local(now)
+        last_local = _to_local(last_run_at).date() if last_run_at is not None else None
         return (
-            now.isoweekday() == weekday
-            and now.time() >= t
-            and (last_run_at is None or last_run_at.date() < now.date())
+            now_local.isoweekday() == weekday
+            and now_local.time() >= t
+            and (last_local is None or last_local < now_local.date())
         )
     if trigger_type == "birthday":
-        # 每天最多评估一次（当天生日的客户在当天触发）
-        return last_run_at is None or last_run_at.date() < now.date()
+        # 每天最多评估一次（当天生日的客户在当天触发；"当天"按本地日期）
+        return last_run_at is None or _to_local(last_run_at).date() < _to_local(now).date()
     if trigger_type == "condition":
         # 每轮调度都评估，重复动作由 action 层去重
         return True
     return False
+
+
+def _cmp_pair(actual, expected):
+    """数值感知比较：两边都能转 float 按数值比，否则按字符串比（字典序）。"""
+    try:
+        return float(actual), float(expected)
+    except (TypeError, ValueError):
+        return str(actual), str(expected)
 
 
 def eval_condition(cond: dict, customer: dict) -> bool:
@@ -72,10 +105,11 @@ def eval_condition(cond: dict, customer: dict) -> bool:
         return actual != expected
     if op == "contains":
         return actual is not None and str(expected) in str(actual)
-    if op == "gt":
-        return actual is not None and str(actual) > str(expected)
-    if op == "lt":
-        return actual is not None and str(actual) < str(expected)
+    if op in ("gt", "lt"):
+        if actual is None:
+            return False
+        a, b = _cmp_pair(actual, expected)
+        return a > b if op == "gt" else a < b
     return False
 
 
@@ -180,32 +214,16 @@ async def run_workflow(
     """执行一次工作流：匹配客户 → 逐客户执行动作 → 写 workflow_runs。
     失败只记 failed，绝不抛出。调用方负责 commit。"""
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    now_local = _to_local(now)  # 生日/"今日"口径与触发时间一致：服务器本地日期
     detail_lines: list[str] = []
     status = "success"
     matched_count = 0
     try:
         if wf.action_type == "send_email" and not settings.SMTP_HOST:
             raise RuntimeError("SMTP 未配置")
-        customers = (
-            (
-                await session.execute(
-                    select(Customer).where(Customer.tenant_id == wf.tenant_id, Customer.deleted_at.is_(None))
-                )
-            )
-            .scalars()
-            .all()
-        )
-        matched = []
-        for customer in customers:
-            ctx = _customer_context(customer)
-            if wf.trigger_type == "birthday" and not is_birthday_today(customer.birthday, now):
-                continue
-            if not eval_conditions(wf.conditions or [], ctx):
-                continue
-            matched.append((customer, ctx))
-        matched_count = len(matched)
         # 批量预取去重标记（一次性查询），消除逐客户 N+1（原每客户 LIKE 全表扫 + 两条 count）
-        day_start = datetime.combine(now.date(), time.min)  # created_at 为 naive TIMESTAMP
+        # "今日"按本地日期解释，换算成 naive UTC 下界与 created_at（naive UTC TIMESTAMP）比较
+        day_start = _local_day_start_utc(now)
         emailed_markers: set[str] = set(
             (
                 await session.execute(
@@ -242,14 +260,42 @@ async def run_workflow(
                 )
             ).all()
         }
-        for customer, ctx in matched:
-            line = await _execute_action(
-                session, wf, customer, ctx, now,
-                emailed_markers, open_rule_tasks, notified_keys,
+        # 客户按 id keyset 分页逐批扫描执行，不再一次性全表加载
+        last_id = 0
+        while True:
+            batch = (
+                (
+                    await session.execute(
+                        select(Customer)
+                        .where(
+                            Customer.tenant_id == wf.tenant_id,
+                            Customer.deleted_at.is_(None),
+                            Customer.id > last_id,
+                        )
+                        .order_by(Customer.id)
+                        .limit(_CUSTOMER_BATCH_SIZE)
+                    )
+                )
+                .scalars()
+                .all()
             )
-            detail_lines.append(line)
-            if " failed" in line or ": failed" in line or "failed:" in line:
-                status = "failed"
+            if not batch:
+                break
+            for customer in batch:
+                last_id = customer.id
+                ctx = _customer_context(customer)
+                if wf.trigger_type == "birthday" and not is_birthday_today(customer.birthday, now_local):
+                    continue
+                if not eval_conditions(wf.conditions or [], ctx):
+                    continue
+                matched_count += 1
+                line = await _execute_action(
+                    session, wf, customer, ctx, now,
+                    emailed_markers, open_rule_tasks, notified_keys,
+                )
+                detail_lines.append(line)
+                if " failed" in line or ": failed" in line or "failed:" in line:
+                    status = "failed"
     except Exception as exc:
         status = "failed"
         detail_lines.append(f"error: {exc}")

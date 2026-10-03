@@ -235,7 +235,8 @@ async def search_chunks_blend(
     """二阶段混合检索（参照 MaxKB blend_search.sql）。
 
     阶段 1：pgvector 余弦召回 top_k*10（封顶 500）。
-    阶段 2：对候选逐条算 BM25（ts_rank_cd + websearch_to_tsquery）。
+    阶段 2：对候选逐条算 BM25（ts_rank_cd + plainto_tsquery，对任意用户输入不抛错，
+    与 keyword 路径一致——websearch_to_tsquery 遇引号会抛错导致整条 blend 降级）。
     综合分 = (1 - distance) + ts_rank_cd，按 comprehensive_score 降序、阈值过滤后取 top_k。
 
     返回的 chunk 字典结构与 search_chunks_vector 一致（含 score=comprehensive_score）。
@@ -290,7 +291,7 @@ async def search_chunks_blend(
             SELECT DISTINCT ON (v.chunk_id) v.chunk_id, v.doc_id, v.chunk_index,
                    v.content, v.doc_title,
                    (1 - v.distance
-                    + COALESCE(ts_rank_cd(c.search_vector, websearch_to_tsquery('simple', :q), 32), 0)
+                    + COALESCE(ts_rank_cd(c.search_vector, plainto_tsquery('simple', :q), 32), 0)
                    ) AS comprehensive_score
             FROM (VALUES {placeholders}) AS v(chunk_id, doc_id, chunk_index, content, doc_title, distance)
             JOIN document_chunks c ON c.id = v.chunk_id
@@ -723,8 +724,13 @@ def trim_blocks(blocks: list[dict], max_chars: int) -> list[dict]:
     return selected
 
 
-async def rewrite_question(question: str, history: list[dict]) -> str:
-    """结合对话历史改写问题（指代消解），仅用于检索；任何失败返回原问题。"""
+async def rewrite_question(
+    question: str, history: list[dict],
+    tenant_id: int | None = None, user_id: int | None = None,
+) -> str:
+    """结合对话历史改写问题（指代消解），仅用于检索；任何失败返回原问题。
+
+    tenant_id/user_id 透传给模型解析：保证按租户选模型且用量统计记到正确租户。"""
     if not history:
         return question
     messages = (
@@ -733,21 +739,29 @@ async def rewrite_question(question: str, history: list[dict]) -> str:
         + [{"role": "user", "content": f"最新问题：{question}"}]
     )
     try:
-        rewritten = (await (await resolve_chat_llm(caller="rewrite")).chat(messages)).strip()
+        rewritten = (
+            await (await resolve_chat_llm(caller="rewrite", tenant_id=tenant_id, user_id=user_id))
+            .chat(messages)
+        ).strip()
         return rewritten or question
     except Exception as exc:
         logger.warning("问题改写失败，使用原问题: %s", exc)
         return question
 
 
-async def rerank_chunks(question: str, candidates: list[dict]) -> list[dict] | None:
-    """精排候选切片：三级降级——专用 rerank 模型 → chat LLM 打分 → None（调用方回退 RRF 序）。"""
+async def rerank_chunks(
+    question: str, candidates: list[dict],
+    tenant_id: int | None = None, user_id: int | None = None,
+) -> list[dict] | None:
+    """精排候选切片：三级降级——专用 rerank 模型 → chat LLM 打分 → None（调用方回退 RRF 序）。
+
+    tenant_id/user_id 透传给模型解析：保证按租户选模型且用量统计记到正确租户。"""
     if not candidates:
         return []
 
     # 1. 专用 rerank 模型（未配置时 resolve 返回 None）
     try:
-        rerank_llm = await resolve_rerank_llm(caller="rerank")
+        rerank_llm = await resolve_rerank_llm(caller="rerank", tenant_id=tenant_id, user_id=user_id)
     except Exception as exc:
         logger.warning("rerank 模型解析失败，回退 chat 打分: %s", exc)
         rerank_llm = None
@@ -769,7 +783,7 @@ async def rerank_chunks(question: str, candidates: list[dict]) -> list[dict] | N
         {"role": "user", "content": f"问题：{question}\n\n候选片段：\n{numbered}"},
     ]
     try:
-        raw = await (await resolve_chat_llm(caller="rerank")).chat(messages)
+        raw = await (await resolve_chat_llm(caller="rerank", tenant_id=tenant_id, user_id=user_id)).chat(messages)
         # 推理型模型输出常带 <think> 思考块，先剥离再解析 JSON
         scores = parse_scores(_strip_think(raw), len(candidates))
         if scores is None:

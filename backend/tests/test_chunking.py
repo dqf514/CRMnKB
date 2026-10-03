@@ -63,6 +63,20 @@ def test_greedy_merge_keeps_overlap_when_possible():
     assert contents[1].endswith(u2)
 
 
+def test_overlap_seed_length_counted_after_flush():
+    """回归：emit 内对 cur_len 的赋值需要 nonlocal；缺失时超长块 flush 后
+    重叠种子的长度丢失（外层 cur_len 仍是 flush 前的旧值），后续段落无法与
+    种子正确合并，会多产出一个只含重叠种子的碎块。"""
+    a = "甲" * 80
+    big = "乙" * 150
+    c = "丙" * 60
+    chunks = chunk_text(f"{a}\n\n{big}\n\n{c}", size=100, overlap=10)
+    contents = _contents(chunks)
+    # big 被硬切成 100+60 两块；a flush 后留下的 10 字重叠种子应与 c 合并成一块
+    assert len(contents) == 4
+    assert contents[-1] == "甲" * 10 + "\n\n" + c
+
+
 def test_paragraphs_not_split_when_they_fit():
     units = ["第一段内容", "第二段内容", "第三段内容"]
     text = "\n\n".join(units)

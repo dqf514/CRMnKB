@@ -18,6 +18,7 @@ from app.models.notebook import Notebook
 from app.models.notification import Notification
 from app.models.resource_permission import ResourcePermission
 from app.models.user import User
+from app.services.audit import record_audit
 from app.services.permissions import ensure_owner
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,10 @@ async def batch_share_files(
             )
         await _send_share_notice(db, user, target, "file", fid, _name_of("file", obj), body.permission)
         shared += 1
+    record_audit(
+        db, user, "share", "file", None,
+        {"file_ids": body.file_ids, "target_user_id": body.user_id, "permission": body.permission},
+    )
     await db.commit()
     return {"ok": True, "shared": shared}
 
@@ -193,6 +198,10 @@ async def share_resource(
             )
         )
     await _send_share_notice(db, user, target, rtype, rid, _name_of(rtype, obj), body.permission)
+    record_audit(
+        db, user, "share", rtype, rid,
+        {"target_user_id": body.user_id, "permission": body.permission, "updated": existing is not None},
+    )
     await db.commit()
     return {
         "ok": True,
@@ -220,7 +229,12 @@ async def update_share(
     )
     if row is None:
         raise HTTPException(status_code=404, detail="尚未分享给该用户")
+    old_permission = row.permission
     row.permission = body.permission
+    record_audit(
+        db, user, "share_update", rtype, rid,
+        {"target_user_id": target_user_id, "from": old_permission, "to": body.permission},
+    )
     await db.commit()
     return {"ok": True, "items": await _acl_list(db, user.tenant_id, rtype, rid, target_user_id)}
 
@@ -242,6 +256,7 @@ async def revoke_share(
             ResourcePermission.user_id == target_user_id,
         )
     )
+    record_audit(db, user, "unshare", rtype, rid, {"target_user_id": target_user_id})
     await db.commit()
 
 
@@ -255,6 +270,7 @@ async def set_visibility(
 ):
     obj = await _get_owned_or_404(db, user, rtype, rid)
     obj.is_private = body.is_private
+    record_audit(db, user, "visibility", rtype, rid, {"is_private": body.is_private})
     await db.commit()
     await db.refresh(obj)
     return {"ok": True, "is_private": bool(obj.is_private)}

@@ -18,7 +18,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_current_user_with_query_token, get_db
@@ -29,6 +29,7 @@ from app.models.document import KnowledgeDocument
 from app.models.knowledge_base import KnowledgeBase
 from app.models.library_file import LibraryFile
 from app.models.library_folder import LibraryFolder
+from app.models.resource_permission import ResourcePermission
 from app.models.user import User
 from app.schemas.library import (
     BatchAssociateRequest,
@@ -57,7 +58,7 @@ from app.services.kb import (
     parse_upload_path,
 )
 from app.services.library_sync import list_changes, mark_updated_and_reparse, utcnow_naive
-from app.services.permissions import accessible_ids, ensure_access, get_access, resolve_permissions
+from app.services.permissions import accessible_ids, ensure_access, ensure_owner, get_access, resolve_permissions
 
 router = APIRouter(prefix="/library", tags=["library"])
 
@@ -174,7 +175,8 @@ async def create_folder(
     user: User = Depends(get_current_user),
 ):
     if body.parent_id is not None:
-        await _get_folder_or_404(db, user, body.parent_id)
+        # 在他人文件夹下建子目录属于写入操作，需 edit 权限（只读授权不能建）
+        await _get_folder_or_404(db, user, body.parent_id, access="edit")
     folder = LibraryFolder(
         tenant_id=user.tenant_id,
         parent_id=body.parent_id,
@@ -300,7 +302,8 @@ async def upload_files(
                 status_code=400, detail=f"category 仅支持 {'/'.join(sorted(valid))}"
             )
     if folder_id is not None:
-        await _get_folder_or_404(db, user, folder_id)
+        # 上传到文件夹属于写入操作，需 edit 权限（只读授权不能传文件）
+        await _get_folder_or_404(db, user, folder_id, access="edit")
     customer = None
     if customer_id is not None:
         customer = await db.get(Customer, customer_id)
@@ -324,7 +327,8 @@ async def upload_files(
             continue
         target_folder_id = folder_id
         for part in folder_parts:
-            folder = await get_or_create_folder(db, user.tenant_id, target_folder_id, part)
+            # 传 user：命中他人私有目录时 get_or_create_folder 会按 edit 权限 403
+            folder = await get_or_create_folder(db, user.tenant_id, target_folder_id, part, user=user)
             target_folder_id = folder.id
 
         suffix = Path(file_name).suffix.lower()
@@ -423,7 +427,7 @@ async def upload_files(
 
     parse_doc_ids: list[int] = []
     for kb_id in dict.fromkeys(target_kb_ids):
-        result = await associate_files(db, user.tenant_id, kb_id, file_ids)
+        result = await associate_files(db, user.tenant_id, kb_id, file_ids, user)
         parse_doc_ids.extend(result["parse_doc_ids"])
 
     # 客户文档资料类型：写入本次关联产生的知识库文档 metadata
@@ -456,16 +460,23 @@ async def upload_files(
 # 文件列表 / 操作 / 批量关联
 # ---------------------------------------------------------------------------
 
+# 列表页签过滤的合法取值（与前端 Library.vue 页签一一对应）
+_LIST_SCOPES = ("all", "mine", "shared", "team")
+
+
 @router.get("/files", response_model=LibraryFileListOut)
 async def list_files(
     folder_id: str | None = Query(None),  # 缺省=根目录；"all"=全部
     customer_id: int | None = Query(None),
     keyword: str | None = Query(None),
+    scope: str | None = Query(None),  # 页签过滤：all/mine/shared/team；缺省=全部（向后兼容）
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    if scope is not None and scope not in _LIST_SCOPES:
+        raise HTTPException(status_code=400, detail=f"scope 非法: {scope}")
     filters = [LibraryFile.tenant_id == user.tenant_id, LibraryFile.deleted_at.is_(None)]
     # 仅返回当前用户可读的文件（owner ∪ 团队可见 ∪ 被分享）
     accessible = await accessible_ids(db, user, "file")
@@ -484,6 +495,30 @@ async def list_files(
         filters.append(LibraryFile.customer_id == customer_id)
     if keyword:
         filters.append(LibraryFile.file_name.like(f"%{keyword}%"))
+    # 页签过滤：只在"用户可读"集合上进一步收窄，不放大可见范围
+    if scope == "mine":
+        # 我的：我是 owner。管理员对租户内全部资源视同 owner（resolve_permissions 同样返回
+        # owner），与前端"我的"页签对管理员展示全部的行为一致，故不再收窄。
+        if user.role != "admin":
+            filters.append(LibraryFile.owner_id == user.id)
+    elif scope == "team":
+        # 团队：团队可见的文件（is_private NULL/FALSE 均算团队可见，与权限服务语义一致）
+        filters.append(or_(LibraryFile.is_private.is_(None), LibraryFile.is_private.is_(False)))
+    elif scope == "shared":
+        if user.role == "admin":
+            # 管理员一切视同 owner，不存在"共享给我"的文件，与前端页签表现一致
+            return LibraryFileListOut(items=[], total=0)
+        # 共享给我的：私有、非我拥有、且未授予我 owner 的文件——可读只能来自分享
+        # （文件级 ACL 或祖先文件夹级联，均已包含在上面的 accessible 集合内）
+        filters.append(LibraryFile.owner_id != user.id)
+        filters.append(LibraryFile.is_private.is_(True))
+        acl_owner_sq = select(ResourcePermission.resource_id).where(
+            ResourcePermission.tenant_id == user.tenant_id,
+            ResourcePermission.resource_type == "file",
+            ResourcePermission.user_id == user.id,
+            ResourcePermission.permission == "owner",
+        )
+        filters.append(LibraryFile.id.notin_(acl_owner_sq))
 
     total = await db.scalar(select(func.count()).select_from(LibraryFile).where(*filters))
     # 关联知识库数：只统计"可见"的知识库——排除系统自动库（is_auto）与已软删知识库，
@@ -613,6 +648,9 @@ async def update_file(
 ):
     file = await _get_file_or_404(db, user, file_id, "edit")
     updates = body.model_dump(exclude_unset=True)
+    # 变更客户归属会把文件自动关联进团队可见的客户专属 KB（等同对全租户公开），须 owner 权限
+    if updates.get("customer_id", file.customer_id) != file.customer_id:
+        await ensure_owner(db, user, "file", file.id)
     if "folder_id" in updates and updates["folder_id"] is not None:
         await _get_folder_or_404(db, user, updates["folder_id"])
     new_customer_id = updates.get("customer_id")
@@ -630,7 +668,7 @@ async def update_file(
     # 设置 customer_id 时自动关联客户专属库
     if customer is not None:
         kb = await get_or_create_customer_kb(db, user.tenant_id, customer.id, customer.name)
-        result = await associate_files(db, user.tenant_id, kb.id, [file.id])
+        result = await associate_files(db, user.tenant_id, kb.id, [file.id], user)
         for doc_id in result["parse_doc_ids"]:
             background_tasks.add_task(process_document, doc_id)
 
@@ -798,7 +836,9 @@ async def batch_associate(
         kb = await db.get(KnowledgeBase, kb_id)
         if kb is None or kb.tenant_id != user.tenant_id:
             raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
-        result = await associate_files(db, user.tenant_id, kb_id, body.file_ids)
+        # 目标 KB 需 edit 权限（此前只查租户归属，可读即可写入关联，越权）
+        await ensure_access(db, user, "kb", kb_id, "edit")
+        result = await associate_files(db, user.tenant_id, kb_id, body.file_ids, user)
         associated += result["associated"]
         already += result["already"]
         parse_doc_ids.extend(result["parse_doc_ids"])

@@ -28,13 +28,17 @@ def _send_sync(to: str, subject: str, body: str) -> None:
         server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30)
     else:
         server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=30)
-        server.starttls()
     try:
+        if not settings.SMTP_USE_SSL:
+            server.starttls()  # 放进 try：starttls 失败也要进 finally 关连接
         if settings.SMTP_USER:
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
         server.send_message(msg)
     finally:
-        server.quit()
+        try:
+            server.quit()
+        except Exception:
+            server.close()  # TLS 协商失败等场景连接已损坏，quit 会再抛错，直接关闭
 
 
 async def send_email(to: str, subject: str, body: str) -> None:

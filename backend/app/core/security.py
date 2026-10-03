@@ -11,6 +11,9 @@ ALGORITHM = "HS256"
 # dsh MCP 专用令牌的 aud 声明：仅允许访问 /api/mcp，不能当登录令牌用
 MCP_TOKEN_AUDIENCE = "dsh-mcp"
 
+# 文件访问令牌的类型声明：仅允许 ?t= 文件直链，不能当登录令牌用
+FILE_TOKEN_TYPE = "file"
+
 _password_hash = PasswordHash((BcryptHasher(),))
 
 
@@ -36,10 +39,11 @@ def create_file_token(file_id: int, user_id: int) -> str:
     """短时效（5 分钟）文件访问令牌，仅用于 <img>/<audio>/<video>/<pdf> 直链流式加载。
 
     带 file 声明并绑定 user_id，避免把长时效登录 JWT 放进 URL（防凭证泄漏/日志窃取）。
+    typ=file 用于与登录 JWT 区分：通用 Bearer 鉴权（api/deps.py）拒绝该类型令牌。
     """
     now = datetime.now(timezone.utc)
     expire = now + timedelta(seconds=300)
-    payload = {"sub": str(user_id), "file": file_id, "iat": now, "exp": expire}
+    payload = {"sub": str(user_id), "file": file_id, "typ": FILE_TOKEN_TYPE, "iat": now, "exp": expire}
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=ALGORITHM)
 
 

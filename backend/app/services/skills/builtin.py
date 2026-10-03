@@ -4,7 +4,7 @@ import ipaddress
 import re
 import socket
 from html import unescape
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
@@ -57,6 +57,55 @@ async def check_url_safe(url: str) -> None:
         ip = ipaddress.ip_address(info[4][0])
         if _is_private(ip):
             raise ValueError("不允许访问内网/本机地址")
+
+
+# 重定向状态码集合
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# 跨主机重定向时必须剥掉的敏感自定义头（防凭据泄露给重定向目标）
+_SENSITIVE_HEADERS = {"authorization", "proxy-authorization", "cookie"}
+
+
+async def checked_request(
+    client: httpx.AsyncClient,
+    method: str,
+    url: str,
+    *,
+    max_redirects: int = 5,
+    **kwargs,
+) -> httpx.Response:
+    """手动跟随重定向的 SSRF 安全请求。
+
+    httpx 的 follow_redirects=True 不会校验重定向目标（可 302 跳到内网），
+    这里要求 client 以 follow_redirects=False 创建，逐跳处理：
+    每一跳前重新跑 check_url_safe；跨主机重定向时剥掉 Authorization 等敏感头。
+    web_fetch 与 ApiSkill 共用此函数，保持一致行为。"""
+    current = url
+    for _ in range(max_redirects + 1):
+        await check_url_safe(current)
+        resp = await client.request(method, current, **kwargs)
+        if resp.status_code not in _REDIRECT_STATUSES:
+            return resp
+        location = resp.headers.get("location")
+        if not location:
+            return resp
+        nxt = urljoin(current, location)
+        # 浏览器语义：303（及带 body 的 301/302）重定向后转 GET 并丢弃请求体
+        if resp.status_code == 303 or (
+            resp.status_code in (301, 302) and method.upper() not in ("GET", "HEAD")
+        ):
+            method = "GET"
+            for k in ("content", "json", "data", "files"):
+                kwargs.pop(k, None)
+        # 跨主机重定向：剥掉敏感自定义头
+        old_host = (urlparse(current).hostname or "").lower()
+        new_host = (urlparse(nxt).hostname or "").lower()
+        if new_host != old_host and "headers" in kwargs:
+            kwargs["headers"] = {
+                k: v for k, v in dict(kwargs["headers"]).items()
+                if k.lower() not in _SENSITIVE_HEADERS
+            }
+        current = nxt
+    raise ValueError(f"重定向次数超过上限（{max_redirects}）")
 
 
 class WebSearchSkill(Skill):
@@ -229,9 +278,9 @@ class WebFetchSkill(Skill):
 
     async def run(self, args: dict, ctx: dict) -> str:
         url = (args.get("url") or "").strip()
-        await check_url_safe(url)
-        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=True) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        # follow_redirects=False：重定向由 checked_request 逐跳校验目标（防 302 跳内网）
+        async with httpx.AsyncClient(timeout=self.timeout, follow_redirects=False) as client:
+            resp = await checked_request(client, "GET", url, headers={"User-Agent": "Mozilla/5.0"})
             resp.raise_for_status()
             html = resp.text
         # 去脚本/样式后剥离标签，合并空白

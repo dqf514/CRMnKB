@@ -4,6 +4,7 @@
 false 时维持固定话术；流式路径同样降级且正常产出 token/done 帧。
 全部用 fake session 与 monkeypatch，不触网不触库。
 """
+import asyncio
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -107,7 +108,7 @@ def _patch_ungrounded(monkeypatch, llm, skills=None):
     async def _empty(db, tid, *a, **kw):
         return []
 
-    async def _no_rerank(q, cands):
+    async def _no_rerank(q, cands, **_kw):
         return None
 
     async def _skills(db, tenant_id):
@@ -279,3 +280,63 @@ async def test_ungrounded_with_skill_uses_agent(monkeypatch):
     assert result["answer"] == "最终答案：42"
     assert result["tools_used"] == ["web_search"]
     assert skill.calls == [{"query": "答案"}]
+
+
+# ---------------------------------------------------------------------------
+# 客户端断连：取消底层 agent / LLM 流，不再空跑完整轮
+# ---------------------------------------------------------------------------
+
+
+async def test_stream_disconnect_cancels_agent_task(monkeypatch):
+    """技能路径：消费中途关闭生成器（客户端断连）→ agent_task 被取消。"""
+    cancelled = asyncio.Event()
+
+    async def _hang_agent(chat_llm, messages, skills, ctx, on_tool, on_phase, on_token, extra=None):
+        await on_phase("思考中")
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(chat_module, "_run_agent", _hang_agent)
+    llm = _RecordingLLM()
+    _patch_ungrounded(monkeypatch, llm, skills=[_FakeSkill()])
+    session = SimpleNamespace(id=7, tenant_id=1, user_id=1, updated_at=None)
+    agen = chat_module.stream_chat_events(_db(), _user(), "hello", session)
+    assert (await agen.__anext__())["type"] == "meta"
+    assert (await agen.__anext__())["type"] == "status"
+    assert (await agen.__anext__())["type"] == "sources"
+    # 下一帧来自 agent 的 thinking 事件（agent_task 已在跑）
+    assert (await agen.__anext__())["type"] == "thinking"
+    await agen.aclose()  # 模拟客户端断连
+    await asyncio.wait_for(cancelled.wait(), timeout=2)  # agent 任务已被取消
+
+
+async def test_stream_disconnect_closes_llm_stream(monkeypatch):
+    """纯流式路径：断连时主动 aclose 底层 LLM 流（中止 HTTP 长连接）。"""
+
+    class _StreamLLM:
+        def __init__(self):
+            self.closed = False
+
+        async def chat_stream(self, messages, **kw):
+            try:
+                yield "第一段"
+                await asyncio.sleep(3600)
+                yield "不会到达"
+            finally:
+                self.closed = True
+
+        async def chat(self, messages, **kw):
+            raise AssertionError("不应走非流式")
+
+    llm = _StreamLLM()
+    _patch_ungrounded(monkeypatch, llm)  # 无 skills → 兜底流式分支
+    session = SimpleNamespace(id=7, tenant_id=1, user_id=1, updated_at=None)
+    agen = chat_module.stream_chat_events(_db(), _user(), "hello", session)
+    async for e in agen:
+        if e["type"] == "token":
+            break
+    await agen.aclose()  # 模拟客户端断连
+    assert llm.closed

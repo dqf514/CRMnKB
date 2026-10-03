@@ -17,6 +17,7 @@ from app.models.report import Report
 from app.models.user import User
 from app.services.acp_bridge import bridge
 from app.services.llm import resolve_chat_llm, resolve_embed_llm
+from app.services.permissions import accessible_ids, filter_accessible_ids
 from app.services.rag import (
     EmbeddingUnavailable,
     _find_block,
@@ -433,11 +434,23 @@ async def aggregate_custom(
     prompt: str,
     kb_ids: list[int] | None = None,
     file_ids: list[int] | None = None,
+    user: User | None = None,
 ) -> dict:
     """自定义报告素材：选中文件小件直读全文；否则混合检索（向量+trgm RRF）。
-    kb_ids/file_ids 为空则全租户检索。
+    kb_ids/file_ids 为空则全租户检索；提供 user 时按其 ACL 限定可读范围（与 rag_query 同口径）。
     返回 {context, sources}；嵌入不可用抛 EmbeddingUnavailable。"""
-    # PR-H：选中的 file_ids 总字符低于阈值时直接读全文（跳过嵌入/检索），
+    # 权限范围：未指定 kb_ids 时检索"用户可读的所有 KB"；指定时过滤掉无权限的；
+    # 文件直读/检索同样只允许用户可读的文件。过滤后无可读范围则返回空素材，
+    # 避免空列表在 search_chunks_* 里退化为"全租户不设限"。
+    if user is not None:
+        if kb_ids is None:
+            kb_ids = await accessible_ids(db, user, "kb")
+        else:
+            kb_ids = await filter_accessible_ids(db, user, "kb", kb_ids)
+        if file_ids:
+            file_ids = await filter_accessible_ids(db, user, "file", file_ids)
+        if not kb_ids and not file_ids:
+            return {"context": "", "sources": []}    # PR-H：选中的 file_ids 总字符低于阈值时直接读全文（跳过嵌入/检索），
     # 确保"分析这个文件"的报告素材真的用上所选文件，而不是被静默忽略
     if file_ids:
         from app.services.file_context import build_direct_file_context
@@ -488,7 +501,10 @@ async def aggregate_custom(
     # 报告场景不做硬阈值过滤——保持素材广度，与对话的阈值过滤不同。
     hits = candidates[:CUSTOM_TOP_K]
     if settings.RAG_RERANK and candidates:
-        reranked = await rerank_chunks(prompt, candidates[: CUSTOM_TOP_K * 2])
+        reranked = await rerank_chunks(
+            prompt, candidates[: CUSTOM_TOP_K * 2],
+            tenant_id=tenant_id, user_id=user.id if user else None,
+        )
         if reranked:
             hits = reranked[:CUSTOM_TOP_K]
     if not hits:
@@ -553,6 +569,8 @@ async def generate_report(report_id: int) -> None:
                 else:
                     messages = build_report_prompt(report.type, data, lang)
             elif report.type == "custom":
+                # 报告属主：服务层检索/直读文件需按其 ACL 限定可读范围
+                owner = await session.get(User, report.user_id)
                 if use_agent:
                     # Agent 模式：kb_ids 只作检索范围提示（软约束），file_ids 小件内联全文
                     report.progress = "Agent 正在准备资料…"
@@ -563,7 +581,7 @@ async def generate_report(report_id: int) -> None:
                         from app.services.file_context import build_direct_file_context
 
                         direct = await build_direct_file_context(
-                            session, report.tenant_id, params["file_ids"]
+                            session, report.tenant_id, params["file_ids"], user=owner
                         )
                         if not direct["too_large"]:
                             extra = direct["context"]
@@ -576,7 +594,7 @@ async def generate_report(report_id: int) -> None:
                     await session.commit()
                     result = await aggregate_custom(
                         session, report.tenant_id, params["prompt"],
-                        params.get("kb_ids"), params.get("file_ids"),
+                        params.get("kb_ids"), params.get("file_ids"), user=owner,
                     )
                     sources = result["sources"]
                     messages = build_custom_report_prompt(params["prompt"], result["context"], lang)
@@ -605,6 +623,7 @@ async def generate_report(report_id: int) -> None:
                         result = await aggregate_custom(
                             session, report.tenant_id, params["prompt"],
                             params.get("kb_ids"), params.get("file_ids"),
+                            user=await session.get(User, report.user_id),
                         )
                         sources = result["sources"]
                         messages = build_custom_report_prompt(params["prompt"], result["context"], lang)
@@ -650,10 +669,11 @@ async def generate_report(report_id: int) -> None:
                 pres = await chat_llm.chat(
                     build_presentation_prompt(content, report.format), timeout=timeout
                 )
-                report.params["presentation_html"] = _strip_code_fence(_strip_think(pres))
+                # JSONB 列必须整体重赋值，就地修改 SQLAlchemy 感知不到会丢更新
+                report.params = {**(report.params or {}), "presentation_html": _strip_code_fence(_strip_think(pres))}
             except Exception:
                 logger.warning("报告 %s 演示版生成失败", report_id, exc_info=True)
-                report.params.setdefault("presentation_html", "")
+                report.params = {**(report.params or {}), "presentation_html": ""}
             report.status = "ready"
             report.error = None
             report.progress = None

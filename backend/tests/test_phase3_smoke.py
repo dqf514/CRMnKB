@@ -71,14 +71,25 @@ async def client(user):
 async def test_update_profile(client, user):
     resp = await client.put(
         "/api/v1/auth/profile",
-        json={"name": "新名字", "email": "a@b.com", "avatar_url": "https://x/y.png"},
+        json={"name": "新名字", "email": "a@b.com"},
     )
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "新名字"
     assert data["email"] == "a@b.com"
-    assert data["avatar_url"] == "https://x/y.png"
     assert user.name == "新名字"
+
+
+async def test_update_profile_ignores_avatar_url(client, user):
+    """avatar_url 只能走 /auth/avatar 上传端点：profile 更新静默忽略该字段（防绕过 MIME 校验）。"""
+    user.avatar_url = "/avatars/old.png"
+    resp = await client.put(
+        "/api/v1/auth/profile",
+        json={"name": "新名字", "avatar_url": "https://evil.example/x.png"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["avatar_url"] == "/avatars/old.png"
+    assert user.avatar_url == "/avatars/old.png"
 
 
 async def test_change_password_success(client, user):
@@ -107,6 +118,22 @@ async def test_preferences_roundtrip(client, user):
     resp = await client.get("/api/v1/auth/preferences")
     assert resp.status_code == 200
     assert resp.json()["theme"] == "dark"
+
+
+async def test_preferences_too_large_422(client, user):
+    """preferences 序列化后超过 16KB → 422（schema 层校验，不落库）。"""
+    resp = await client.put("/api/v1/auth/preferences", json={"data": "x" * (17 * 1024)})
+    assert resp.status_code == 422
+
+
+async def test_change_password_clears_must_change_flag(client, user):
+    """首登强制改密：改密成功后 must_change_password 置 False。"""
+    user.must_change_password = True
+    resp = await client.put(
+        "/api/v1/auth/password", json={"old_password": "old123", "new_password": "newpass456"}
+    )
+    assert resp.status_code == 204
+    assert user.must_change_password is False
 
 
 # ---------- 多轮对话问答（mock pipeline） ----------

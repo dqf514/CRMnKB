@@ -128,7 +128,8 @@ async def test_content_416_invalid_range(client, tmp_path):
         "/api/v1/library/files/1/content", headers={"Range": "bytes=100-"}
     )
     assert resp.status_code == 416  # FileResponse 内置 Range 处理
-    assert resp.headers["content-range"] == "*/10"
+    # starlette 1.x 起 416 响应的 Content-Range 按 RFC 9110 带 bytes 单位前缀
+    assert resp.headers["content-range"] == "bytes */10"
 
 
 async def test_content_404_record_not_found(client):

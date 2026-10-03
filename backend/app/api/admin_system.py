@@ -11,9 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db, require_admin
 from app.config import settings
+from app.models.system_setting import SystemSetting
 from app.models.user import User
 from app.services.audit import record_audit
-from app.services.backup import list_backups, restore_backup, run_backup
+from app.services.backup import AUTO_BACKUP_KEY, list_backups, restore_backup, run_backup
 from app.services.maintenance import cleanup_orphan_uploads, reindex_vector_index, run_vacuum
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,43 @@ async def do_restore(
         raise HTTPException(status_code=404, detail="备份不存在")
     background_tasks.add_task(restore_backup, name)
     return {"ok": True, "started": True, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# 定时自动备份开关（system_settings: backup_auto_enabled，默认关；
+# 开启后由后台告警循环每日（UTC 日）自动备份一次，见 services/backup.maybe_auto_backup）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/system/auto-backup")
+async def get_auto_backup(
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """读取定时自动备份开关。"""
+    row = await db.get(SystemSetting, AUTO_BACKUP_KEY)
+    enabled = (row.value if row else "").strip().lower() in {"1", "true", "on", "yes"}
+    return {"enabled": enabled}
+
+
+@router.put("/system/auto-backup")
+async def set_auto_backup(
+    enabled: bool = Query(...),
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """设置定时自动备份开关（记审计）。"""
+    row = await db.get(SystemSetting, AUTO_BACKUP_KEY)
+    if row is None:
+        row = SystemSetting(key=AUTO_BACKUP_KEY)
+        db.add(row)
+    row.value = "true" if enabled else "false"
+    record_audit(
+        db, admin, "update", "system_setting", None,
+        {"key": AUTO_BACKUP_KEY, "enabled": enabled},
+    )
+    await db.commit()
+    return {"enabled": enabled}
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.library_file import LibraryFile
+from app.models.user import User
+from app.services.permissions import filter_accessible_ids
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +111,7 @@ def _read_one_file(file: LibraryFile) -> str:
 
 
 async def build_direct_file_context(
-    db: AsyncSession, tenant_id: int, file_ids: list[int]
+    db: AsyncSession, tenant_id: int, file_ids: list[int], user: User | None = None
 ) -> dict:
     """按 file_ids 读文件全文。
 
@@ -117,9 +119,15 @@ async def build_direct_file_context(
 
     - too_large=True: 总字符数超 RAG_DIRECT_FILE_MAX_CHARS，调用方应回退 RAG
     - context 为 "" 时 files 全部不可解析，也回退 RAG
+    - 提供 user 时先按 ACL 过滤出可读文件（防越权直读他人私有文件）
     """
     if not file_ids:
         return {"context": "", "files": [], "too_large": False, "total_chars": 0}
+
+    if user is not None:
+        file_ids = await filter_accessible_ids(db, user, "file", file_ids)
+        if not file_ids:
+            return {"context": "", "files": [], "too_large": False, "total_chars": 0}
 
     rows = (
         await db.execute(

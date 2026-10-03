@@ -4,6 +4,7 @@ SSRF 防护、api skill 占位符、对话 agent 循环与降级。
 HTTP 全部走 httpx MockTransport / monkeypatch，不触网不触库。
 """
 import json
+import socket
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -119,6 +120,12 @@ def _mock_httpx(monkeypatch, module, handler, captured):
         return real(*args, **kwargs)
 
     monkeypatch.setattr(module.httpx, "AsyncClient", factory)
+    # check_url_safe 会做真实 DNS 解析：本机代理 fake-ip（198.18.x.x 保留段）会导致
+    # example.com 之类被误判为内网。测试里主机名一律解析到固定公网 IP，保持环境无关。
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, *a, **kw: [(socket.AF_INET, 0, 0, "", ("93.184.216.34", 0))],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +376,99 @@ async def test_web_fetch_strips_html(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# SSRF 重定向防护：follow_redirects=False，checked_request 逐跳校验
+# ---------------------------------------------------------------------------
+
+async def test_web_fetch_redirect_to_internal_blocked(monkeypatch):
+    """历史缺陷回归：302 跳到内网地址，重定向目标必须重新过 SSRF 校验。"""
+    import app.services.skills.builtin as builtin_mod
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/admin"})
+
+    _mock_httpx(monkeypatch, builtin_mod, handler, {})
+    skill = WebFetchSkill()
+    with pytest.raises(ValueError, match="内网"):
+        await skill.run({"url": "https://example.com/start"}, {})
+    assert calls == ["https://example.com/start"]  # 仅发出第一跳请求
+
+
+async def test_web_fetch_follows_safe_redirect(monkeypatch):
+    """同主机相对路径重定向正常跟随。"""
+    import app.services.skills.builtin as builtin_mod
+
+    def handler(request):
+        if str(request.url).endswith("/start"):
+            return httpx.Response(302, headers={"Location": "/real"})
+        return httpx.Response(200, text="<p>最终内容</p>")
+
+    _mock_httpx(monkeypatch, builtin_mod, handler, {})
+    skill = WebFetchSkill()
+    result = await skill.run({"url": "https://example.com/start"}, {})
+    assert "最终内容" in result
+
+
+async def test_web_fetch_redirect_loop_limited(monkeypatch):
+    """重定向环超过最大跳数即报错，不无限跟随。"""
+    import app.services.skills.builtin as builtin_mod
+
+    calls = []
+
+    def handler(request):
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "/loop"})
+
+    _mock_httpx(monkeypatch, builtin_mod, handler, {})
+    skill = WebFetchSkill()
+    with pytest.raises(ValueError, match="重定向次数"):
+        await skill.run({"url": "https://example.com/loop"}, {})
+    assert len(calls) == 6  # 首跳 + 最多 5 次跟随
+
+
+async def test_api_skill_redirect_to_internal_blocked(monkeypatch):
+    """api skill 的重定向目标同样逐跳校验（如云元数据地址 169.254.169.254）。"""
+    import app.services.skills.api_skill as api_mod
+
+    def handler(request):
+        return httpx.Response(302, headers={"Location": "http://169.254.169.254/latest/meta-data"})
+
+    _mock_httpx(monkeypatch, api_mod, handler, {})
+    skill = ApiSkill(
+        name="t", description=None, parameters=None,
+        config={"method": "GET", "url": "https://api.example.com/x"},
+    )
+    with pytest.raises(ValueError, match="内网"):
+        await skill.run({}, {})
+
+
+async def test_api_skill_redirect_cross_host_strips_auth(monkeypatch):
+    """跨主机重定向剥掉 Authorization 等敏感自定义头，防凭据泄露。"""
+    import app.services.skills.api_skill as api_mod
+
+    seen = []
+
+    def handler(request):
+        seen.append((str(request.url), request.headers.get("Authorization")))
+        if str(request.url).endswith("/start"):
+            return httpx.Response(302, headers={"Location": "https://cdn.other-example.com/final"})
+        return httpx.Response(200, json={"ok": True})
+
+    _mock_httpx(monkeypatch, api_mod, handler, {})
+    skill = ApiSkill(
+        name="t", description=None, parameters=None,
+        config={"method": "GET", "url": "https://api.example.com/start",
+                "headers": {"Authorization": "Bearer secret-token"}},
+    )
+    result = await skill.run({}, {})
+    assert "ok" in result
+    assert seen[0] == ("https://api.example.com/start", "Bearer secret-token")
+    assert seen[1] == ("https://cdn.other-example.com/final", None)  # 敏感头已剥离
+
+
+# ---------------------------------------------------------------------------
 # 自定义 api skill：占位符替换
 # ---------------------------------------------------------------------------
 
@@ -494,7 +594,7 @@ def _patch_retrieval(monkeypatch, llm, skills):
     async def _kw(db, tid, q, limit, kb_ids=None, file_ids=None):
         return [hit]
 
-    async def _no_rerank(q, cands):
+    async def _no_rerank(q, cands, **_kw):
         return None
 
     async def _expand(db, tid, hits, window):
