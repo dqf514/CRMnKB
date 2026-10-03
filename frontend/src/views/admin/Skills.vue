@@ -127,7 +127,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { validateForm } from '../../utils/validateForm'
 import { getAdminSkills, createSkill, updateSkill, deleteSkill, testSkill } from '../../api'
 import { enumLabel, enumTagType } from '../../utils/format'
 
@@ -217,7 +219,7 @@ function parseJsonField(text, label) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   let config = null
   if (form.type === 'builtin' && form.name === 'web_search') {
     config = { provider: form.provider }
@@ -261,7 +263,8 @@ async function toggleEnabled(row, val) {
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm(`确定删除 Skill「${row.display_name || row.name}」吗？`, '删除确认', { type: 'warning' })
+  const ok = await confirmDanger(`确定删除 Skill「${row.display_name || row.name}」吗？`)
+  if (!ok) return
   await deleteSkill(row.id)
   ElMessage.success('删除成功')
   loadList()

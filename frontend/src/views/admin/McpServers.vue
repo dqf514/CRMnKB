@@ -131,7 +131,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { Plus, Warning } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { validateForm } from '../../utils/validateForm'
 import { formatDateTime } from '../../utils/format'
 import {
   getMcpServers,
@@ -243,7 +245,7 @@ function openForm(row) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   let config
   try { config = buildConfig() } catch { return }
   saving.value = true
@@ -300,11 +302,11 @@ async function syncTools(row) {
     ElMessage.warning('请先点击 [连接] 发现工具')
     return
   }
-  const { value: synced } = await ElMessageBox.confirm(
+  const synced = await confirmDanger(
     `将 ${row.discovered_tools.length} 个工具注册为 Skill（type=mcp）？`,
     '同步工具',
     { type: 'info' }
-  ).then(() => ({ value: 1 })).catch(() => ({ value: 0 }))
+  )
   if (!synced) return
   const result = await syncMcpTools(row.id)
   ElMessage.success(`已同步 ${result.synced} 个工具到 Skill 列表`)
@@ -321,11 +323,10 @@ async function showTools(row) {
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm(
-    `确定删除 MCP server「${row.display_name || row.name}」吗？关联的 Skill 会被一并删除。`,
-    '删除确认',
-    { type: 'warning' }
+  const ok = await confirmDanger(
+    `确定删除 MCP server「${row.display_name || row.name}」吗？关联的 Skill 会被一并删除。`
   )
+  if (!ok) return
   await deleteMcpServer(row.id)
   ElMessage.success('已删除')
   loadList()

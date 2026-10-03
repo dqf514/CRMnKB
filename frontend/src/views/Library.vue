@@ -62,8 +62,6 @@
           size="small"
           clearable
           class="search-input"
-          @keyup.enter="handleSearch"
-          @clear="handleSearch"
         >
           <template #append>
             <el-button :icon="Search" @click="handleSearch" />
@@ -95,7 +93,15 @@
         <el-button link size="small" @click="clearSelection">取消选择</el-button>
       </div>
 
-      <el-table :data="filteredFiles" v-loading="loading" stripe @selection-change="onSelectionChange">
+      <el-table :data="files" v-loading="loading" stripe @selection-change="onSelectionChange">
+        <template #empty>
+          <!-- 加载失败给重试入口；无数据给一句引导 -->
+          <div v-if="loadError" class="load-fail">
+            <p>文件列表加载失败，请检查网络后重试</p>
+            <el-button type="primary" size="small" @click="loadFiles">重试</el-button>
+          </div>
+          <el-empty v-else :image-size="80" description="暂无文件，点上方「上传文件」开始积累资料" />
+        </template>
         <el-table-column type="selection" width="44" />
         <el-table-column label="名称" min-width="180" show-overflow-tooltip>
           <template #default="{ row }">
@@ -210,7 +216,7 @@
 
     <!-- 新建 / 重命名文件夹 -->
     <el-dialog v-model="folderDialog" :title="folderForm.id ? '重命名文件夹' : '新建文件夹'" width="min(90vw, 420px)">
-      <el-input v-model="folderForm.name" placeholder="文件夹名称" @keyup.enter="handleSaveFolder" />
+      <el-input v-model="folderForm.name" placeholder="文件夹名称" maxlength="100" show-word-limit @keyup.enter="handleSaveFolder" />
       <template #footer>
         <el-button @click="folderDialog = false">取消</el-button>
         <el-button type="primary" :loading="folderSaving" @click="handleSaveFolder">保存</el-button>
@@ -283,12 +289,14 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import ShareDialog from '../components/ShareDialog.vue'
+import { watchDebounced } from '../utils/watchDebounced'
 import { useThemeStore } from '../stores/theme'
 import {
   Plus, Search, Upload, UploadFilled, FolderAdd, FolderOpened, Back, Collection,
   Document, Picture, Headset, Box, Files, Share, Delete, View,
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
 import {
   getLibraryTree, createLibraryFolder, updateLibraryFolder, deleteLibraryFolder,
   getLibraryFiles, updateLibraryFile, deleteLibraryFile, associateLibraryFiles,
@@ -370,21 +378,17 @@ function goParent() {
 
 // ========== 文件列表 ==========
 const loading = ref(false)
+const loadError = ref(false)
 const files = ref([])
 const total = ref(0)
 const themeStore = useThemeStore()
 const query = reactive({ keyword: '', page: 1, page_size: themeStore.pageSize })
 const scope = ref('all')
 
-// 页签过滤：我的/共享给我的/团队
-const filteredFiles = computed(() => {
-  if (scope.value === 'all') return files.value
-  return files.value.filter((f) => {
-    if (scope.value === 'mine') return f.perm === 'owner'
-    // 团队 tab = 所有团队可见的内容（含本人开的团队共享），is_private 为 null/false 都算团队可见
-    if (scope.value === 'team') return f.is_private !== true
-    return f.perm && f.perm !== 'owner' && f.is_private !== false
-  })
+// 页签过滤已下推到服务端（scope 参数）：切页签重置到第 1 页并重新请求
+watch(scope, () => {
+  query.page = 1
+  loadFiles()
 })
 
 const shareDialog = ref(false)
@@ -417,13 +421,17 @@ function onSizeChange() {
 
 async function loadFiles() {
   loading.value = true
+  loadError.value = false
   try {
-    const params = { page: query.page, page_size: query.page_size }
+    const params = { page: query.page, page_size: query.page_size, scope: scope.value }
     if (currentFolderId.value !== null) params.folder_id = currentFolderId.value
     if (query.keyword) params.keyword = query.keyword
     const res = await getLibraryFiles(params)
     files.value = res.items || []
     total.value = res.total || 0
+  } catch {
+    // 拦截器已 toast，这里切到重试态避免只剩空表
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -433,6 +441,9 @@ function handleSearch() {
   query.page = 1
   loadFiles()
 }
+
+// 关键字防抖即搜（300ms）：输入停顿或清空后自动搜索，无需回车
+watchDebounced(() => query.keyword, handleSearch)
 
 // 文件格式图标
 const ICONS = {
@@ -586,8 +597,13 @@ function openFolderForm(folder) {
 }
 
 async function handleSaveFolder() {
-  if (!folderForm.name.trim()) {
+  const name = folderForm.name.trim()
+  if (!name) {
     ElMessage.warning('请输入文件夹名称')
+    return
+  }
+  if (name.length > 100) {
+    ElMessage.warning('文件夹名称最长 100 个字符')
     return
   }
   folderSaving.value = true
@@ -608,11 +624,12 @@ async function handleSaveFolder() {
 }
 
 async function handleDeleteFolder() {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定删除文件夹「${currentFolder.value?.name}」吗？将删除其中全部内容（含子文件夹与文件）。`,
     '删除确认',
     { type: 'error', confirmButtonText: '删除' }
   )
+  if (!ok) return
   await deleteLibraryFolder(currentFolderId.value, true)
   ElMessage.success('删除成功')
   goParent()
@@ -702,11 +719,10 @@ async function handleAssociate() {
 }
 
 async function handleDeleteFile(row) {
-  await ElMessageBox.confirm(
-    `确定删除文件「${row.file_name}」吗？文件及其在各知识库中的关联与切片将一并删除。`,
-    '删除确认',
-    { type: 'warning' }
+  const ok = await confirmDanger(
+    `确定删除文件「${row.file_name}」吗？文件及其在各知识库中的关联与切片将一并删除。`
   )
+  if (!ok) return
   await deleteLibraryFile(row.id)
   ElMessage.success('删除成功')
   loadFiles()
@@ -758,11 +774,12 @@ async function handleBatchShare() {
 }
 
 async function handleBatchDelete() {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定删除选中的 ${selectedFiles.value.length} 个文件吗？文件及其在各知识库中的关联与切片将一并删除。`,
     '批量删除确认',
-    { type: 'warning', confirmButtonText: '删除' }
+    { confirmButtonText: '删除' }
   )
+  if (!ok) return
   for (const f of selectedFiles.value) {
     await deleteLibraryFile(f.id)
   }
@@ -831,6 +848,16 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+}
+/* 列表加载失败重试态（在 el-table 空态槽内） */
+.load-fail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 0;
+  color: var(--app-ink-2);
+  font-size: 13px;
 }
 .tree-toggle {
   cursor: pointer;

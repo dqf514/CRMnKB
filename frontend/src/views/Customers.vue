@@ -7,8 +7,6 @@
           placeholder="搜索名称 / 单位 / 电话"
           style="width: 220px"
           clearable
-          @keyup.enter="handleSearch"
-          @clear="handleSearch"
         />
         <el-select v-model="query.status" placeholder="状态" style="width: 120px" clearable @change="handleSearch">
           <el-option v-for="(v, k) in customerStatusMap" :key="k" :label="v.label" :value="k" />
@@ -23,10 +21,22 @@
           <el-option v-for="t in tagOptions" :key="t" :label="t" :value="t" />
         </el-select>
         <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
-        <el-button :icon="Setting" @click="openIndustryDialog">行业设置</el-button>
-        <el-button :icon="Download" @click="handleDownloadTemplate">下载模板</el-button>
-        <el-button :icon="Upload" @click="openImport">导入</el-button>
-        <el-button :icon="Download" :loading="exporting" @click="handleExport">导出</el-button>
+        <!-- 低频操作：窄屏收进「更多」下拉，宽屏平铺 -->
+        <el-button class="low-freq" :icon="Setting" @click="openIndustryDialog">行业设置</el-button>
+        <el-button class="low-freq" :icon="Download" @click="handleDownloadTemplate">下载模板</el-button>
+        <el-button class="low-freq" :icon="Upload" @click="openImport">导入</el-button>
+        <el-button class="low-freq" :icon="Download" :loading="exporting" @click="handleExport">导出</el-button>
+        <el-dropdown class="more-menu" trigger="click" @command="handleMoreCommand">
+          <el-button :icon="MoreFilled">更多</el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="industry"><el-icon><Setting /></el-icon>行业设置</el-dropdown-item>
+              <el-dropdown-item command="template"><el-icon><Download /></el-icon>下载模板</el-dropdown-item>
+              <el-dropdown-item command="import"><el-icon><Upload /></el-icon>导入</el-dropdown-item>
+              <el-dropdown-item command="export"><el-icon><Download /></el-icon>导出</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
         <div class="toolbar-right">
           <el-radio-group v-model="viewMode" size="small" @change="persistViewMode">
             <el-radio-button value="card"><el-icon><Grid /></el-icon>&nbsp;卡片</el-radio-button>
@@ -36,8 +46,14 @@
         </div>
       </div>
 
+      <!-- 加载失败：重试入口（错误细节已由拦截器 toast 提示） -->
+      <div v-if="loadError" class="load-fail">
+        <p>客户列表加载失败，请检查网络后重试</p>
+        <el-button type="primary" @click="loadList">重试</el-button>
+      </div>
+
       <!-- 表格视图 -->
-      <el-table v-if="viewMode === 'table'" :data="list" v-loading="loading" stripe class="clickable-rows" @row-click="goDetail">
+      <el-table v-else-if="viewMode === 'table'" :data="list" v-loading="loading" stripe class="clickable-rows" @row-click="goDetail">
         <el-table-column label="名称" min-width="130">
           <template #default="{ row }">
             <el-link type="primary" @click.stop="goDetail(row)">{{ row.name }}</el-link>
@@ -91,7 +107,7 @@
       </el-table>
 
       <!-- 卡片视图 -->
-      <div v-else v-loading="loading" class="card-grid">
+      <div v-else-if="!loadError" v-loading="loading" class="card-grid">
         <div v-for="row in list" :key="row.id" class="customer-card" @click="goDetail(row)">
           <div class="cc-head">
             <span class="cc-name">{{ row.name }}</span>
@@ -120,6 +136,7 @@
       </div>
 
       <el-pagination
+        v-if="!loadError"
         class="pager"
         v-model:current-page="query.page"
         v-model:page-size="query.page_size"
@@ -215,8 +232,9 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useThemeStore } from '../stores/theme'
 import { useRouter } from 'vue-router'
-import { Search, Plus, Setting, Upload, Download, UploadFilled, Grid, List } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { Search, Plus, Setting, Upload, Download, UploadFilled, Grid, List, MoreFilled } from '@element-plus/icons-vue'
+import { watchDebounced } from '../utils/watchDebounced'
+import { ElMessage } from 'element-plus'
 import {
   getCustomers,
   getIndustries, createIndustry, updateIndustry, deleteIndustry,
@@ -225,12 +243,16 @@ import {
 import { useIndustryStore } from '../stores/industries'
 import CustomerFormDrawer from '../components/CustomerFormDrawer.vue'
 import { customerStatusMap, ddqStatusMap, enumLabel, enumTagType, formatDateTime, CUSTOMER_TAG_PRESETS } from '../utils/format'
+import { usePagedFetch } from '../utils/usePagedFetch'
+import { confirmDanger } from '../utils/confirmDanger'
 
 const router = useRouter()
 const industryStore = useIndustryStore()
-const loading = ref(false)
+// 列表请求防竞态（序号法），loading 由 composable 管理
+const { loading, run: runFetch } = usePagedFetch()
 const list = ref([])
 const total = ref(0)
+const loadError = ref(false)
 const themeStore = useThemeStore()
 const query = reactive({ keyword: '', status: '', ddq_status: '', industry: '', tag: '', page: 1, page_size: themeStore.pageSize })
 
@@ -252,20 +274,34 @@ const tagOptions = computed(() => {
   return [...set]
 })
 
+// 列表查询参数构造：列表请求与导出共用（导出不含分页参数），保证过滤条件一致
+function buildQueryParams({ withPage = true } = {}) {
+  const params = {}
+  if (withPage) {
+    params.page = query.page
+    params.page_size = query.page_size
+  }
+  if (query.keyword) params.keyword = query.keyword
+  if (query.status) params.status = query.status
+  if (query.industry) params.industry = query.industry
+  if (query.tag) params.tag = query.tag
+  if (query.ddq_status) params.ddq_status = query.ddq_status
+  return params
+}
+
 async function loadList() {
-  loading.value = true
+  loadError.value = false
   try {
-    const params = { page: query.page, page_size: query.page_size }
-    if (query.keyword) params.keyword = query.keyword
-    if (query.status) params.status = query.status
-    if (query.industry) params.industry = query.industry
-    if (query.tag) params.tag = query.tag
-    if (query.ddq_status) params.ddq_status = query.ddq_status
-    const res = await getCustomers(params)
-    list.value = res.items || []
-    total.value = res.total || 0
-  } finally {
-    loading.value = false
+    await runFetch(
+      () => getCustomers(buildQueryParams()),
+      (res) => {
+        list.value = res.items || []
+        total.value = res.total || 0
+      }
+    )
+  } catch {
+    // 拦截器已 toast，这里切到重试态避免只剩空表
+    loadError.value = true
   }
 }
 
@@ -273,6 +309,17 @@ function handleSearch() {
   query.page = 1
   loadList()
 }
+
+// 窄屏「更多」下拉的命令分发（与平铺按钮同一批处理函数）
+function handleMoreCommand(cmd) {
+  if (cmd === 'industry') openIndustryDialog()
+  else if (cmd === 'template') handleDownloadTemplate()
+  else if (cmd === 'import') openImport()
+  else if (cmd === 'export') handleExport()
+}
+
+// 关键字防抖即搜（300ms）：输入停顿或清空后自动搜索，无需回车
+watchDebounced(() => query.keyword, handleSearch)
 
 const drawerVisible = ref(false)
 
@@ -337,12 +384,8 @@ async function handleDownloadTemplate() {
 async function handleExport() {
   exporting.value = true
   try {
-    const params = {}
-    if (query.keyword) params.keyword = query.keyword
-    if (query.status) params.status = query.status
-    if (query.industry) params.industry = query.industry
-    if (query.tag) params.tag = query.tag
-    const blob = await exportCustomers(params)
+    // 与列表共用过滤参数（含 ddq_status），不带分页
+    const blob = await exportCustomers(buildQueryParams({ withPage: false }))
     downloadBlob(blob, '客户导出.xlsx')
   } finally {
     exporting.value = false
@@ -421,7 +464,7 @@ async function toggleIndustry(row, val) {
 }
 
 async function handleDeleteIndustry(row) {
-  await ElMessageBox.confirm(`确定删除行业「${row.name}」吗？`, '删除确认', { type: 'warning' })
+  if (!(await confirmDanger(`确定删除行业「${row.name}」吗？`))) return
   await deleteIndustry(row.id)
   ElMessage.success('删除成功')
   await loadIndustries()
@@ -440,6 +483,28 @@ onMounted(() => {
   flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 16px;
+}
+/* 窄屏：低频操作收进「更多」下拉，只留搜索/新增等主操作外露 */
+.more-menu {
+  display: none;
+}
+@media (max-width: 768px) {
+  .toolbar .low-freq {
+    display: none;
+  }
+  .more-menu {
+    display: inline-flex;
+  }
+}
+/* 首屏/刷新失败重试态 */
+.load-fail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 60px 0;
+  color: var(--app-ink-2);
+  font-size: 14px;
 }
 .toolbar-right {
   margin-left: auto;

@@ -1,6 +1,6 @@
 <template>
   <div class="today-page" v-loading="loading">
-    <div class="today-grid">
+    <div class="today-grid" v-if="!loadError">
       <!-- 左栏：台历块（大号日数 + 月份星期 + 问候 + 日报入口） -->
       <section class="col-cal rise">
         <div class="cal-day">{{ dayNum }}</div>
@@ -104,6 +104,12 @@
       </section>
     </div>
 
+    <!-- 首屏加载失败：给重试入口（错误细节已由拦截器 toast 提示） -->
+    <div v-else class="load-fail">
+      <p>今日数据加载失败，请检查网络后重试</p>
+      <el-button type="primary" @click="load">重试</el-button>
+    </div>
+
     <!-- 日报弹窗 -->
     <el-dialog v-model="reportDialog" :title="`日报 · ${reportData?.date || ''}`" width="min(92vw, 560px)">
       <div v-if="reportData" class="report-body">
@@ -129,11 +135,12 @@ import { useAuthStore } from '../stores/auth'
 import { getDashboardToday, quickCapture, getDailyReport } from '../api'
 import { uploadLibraryFiles } from '../api/libraryUpload'
 import { ensureUploadFormats, isEnabledExt, enabledAcceptStr } from '../utils/uploadFormats'
-import { formatDateTime } from '../utils/format'
+import { formatDateTime, parseServerDate } from '../utils/format'
 
 const router = useRouter()
 const authStore = useAuthStore()
 const loading = ref(false)
+const loadError = ref(false)
 const overview = ref({})
 const staleDays = 7
 
@@ -155,7 +162,9 @@ const greeting = computed(() => {
 
 function formatDue(d) {
   if (!d) return ''
-  const dt = new Date(d)
+  // 统一走 parseServerDate：后端 naive UTC 字符串按 UTC 解析，避免差 8 小时
+  const dt = parseServerDate(d)
+  if (!dt) return ''
   const today = new Date(); today.setHours(0, 0, 0, 0)
   return dt < today ? `逾期 ${Math.floor((today - dt) / 86400000)} 天` : '今日到期'
 }
@@ -231,8 +240,12 @@ async function openDailyReport() {
 
 async function load() {
   loading.value = true
+  loadError.value = false
   try {
     overview.value = await getDashboardToday()
+  } catch {
+    // 拦截器已 toast，这里切到重试态避免只剩空白页
+    loadError.value = true
   } finally {
     loading.value = false
   }
@@ -320,9 +333,8 @@ onMounted(load)
 }
 .capture-hint {
   margin-left: auto;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--app-ink-2);
-  opacity: 0.7;
 }
 .attach-chips {
   margin-top: 6px;
@@ -408,6 +420,16 @@ onMounted(load)
   padding: 20px 0;
   text-align: center;
 }
+/* 首屏失败重试态 */
+.load-fail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 80px 0;
+  color: var(--app-ink-2);
+  font-size: 14px;
+}
 .col-feed {
   flex: none;
   width: 320px;
@@ -440,7 +462,7 @@ onMounted(load)
   white-space: nowrap;
 }
 .a-time {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--app-ink-2);
   flex: none;
 }

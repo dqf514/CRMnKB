@@ -8,7 +8,7 @@
         <el-tag v-if="associatedKbs.length + associatedFiles.length" size="small" type="primary">
           {{ associatedKbs.length + associatedFiles.length }}
         </el-tag>
-        <el-button link size="small" :icon="Plus" class="section-add" @click="openAssociateDialog" />
+        <el-button link size="small" :icon="Plus" class="section-add" aria-label="关联知识库或文档" @click="openAssociateDialog" />
       </div>
       <div v-if="associatedKbs.length + associatedFiles.length" class="source-list">
         <div v-for="kb in associatedKbs" :key="'kb-' + kb.id" class="source-item">
@@ -17,7 +17,7 @@
           <span class="item-name" :title="kb.name">{{ kb.name }}</span>
           <span class="item-meta">{{ kb.doc_count || 0 }} 文档</span>
           <el-tooltip content="取消关联" placement="top">
-            <el-button link size="small" :icon="Close" class="remove-btn" @click="unassociateKb(kb.id)" />
+            <el-button link size="small" :icon="Close" class="remove-btn" :aria-label="`取消关联知识库 ${kb.name}`" @click="unassociateKb(kb.id)" />
           </el-tooltip>
         </div>
         <div v-for="f in associatedFiles" :key="'file-' + f.id" class="source-item">
@@ -25,7 +25,7 @@
           <el-icon class="file-icon"><component :is="fileIcon(f.file_type)" /></el-icon>
           <span class="item-name file-link" :title="f.file_name" @click="openPreview(f)">{{ f.file_name }}</span>
           <el-tooltip content="取消关联" placement="top">
-            <el-button link size="small" :icon="Close" class="remove-btn" @click="unassociateFile(f.id)" />
+            <el-button link size="small" :icon="Close" class="remove-btn" :aria-label="`取消关联文件 ${f.file_name}`" @click="unassociateFile(f.id)" />
           </el-tooltip>
         </div>
       </div>
@@ -136,7 +136,8 @@ async function loadAll() {
     allKbs.value = Array.isArray(res) ? res : (res?.items || [])
   } catch { allKbs.value = [] }
   try {
-    const res = await getLibraryFiles({ page: 1, page_size: 200 })
+    // folder_id 缺省只返回根目录文件，后端约定 "all" 表示全部文件
+    const res = await getLibraryFiles({ page: 1, page_size: 200, folder_id: 'all' })
     allFiles.value = res?.items || []
   } catch { allFiles.value = [] }
 }
@@ -265,7 +266,7 @@ onMounted(loadAll)
 }
 .item-meta {
   color: var(--app-ink-2);
-  font-size: 11px;
+  font-size: 12px;
   flex: none;
 }
 .file-icon {

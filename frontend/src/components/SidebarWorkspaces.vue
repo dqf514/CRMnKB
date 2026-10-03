@@ -1,7 +1,7 @@
 <template>
   <!-- 侧栏工作区列表：点击切换当前工作区并跳转工作台，hover 出"···"菜单（重命名/共享/删除） -->
   <div class="ws-list" v-loading="studio.loadingNotebooks && !studio.notebooks.length">
-    <div v-if="!studio.notebooks.length" class="ws-empty">还没有工作区，点上方「新的任务」新建</div>
+    <div v-if="!studio.notebooks.length" class="ws-empty">还没有工作区，点上方「新的工作区」新建</div>
     <div
       v-for="nb in studio.notebooks"
       :key="nb.id"
@@ -38,6 +38,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { MoreFilled, Edit, Share, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
 import { useStudioStore } from '../stores/studio'
 import { useAuthStore } from '../stores/auth'
 import { updateNotebook, deleteNotebook } from '../api'
@@ -89,10 +90,8 @@ async function onCommand(cmd, nb) {
     shareTarget.value = { id: nb.id, name: nb.name, owner_id: nb.created_by, is_private: nb.is_private, perm: nb.perm }
     shareDialog.value = true
   } else if (cmd === 'delete') {
-    await ElMessageBox.confirm(
-      `确定删除工作区「${nb.name}」？将移入回收站，可随时恢复。`,
-      '删除确认', { type: 'warning' }
-    )
+    const ok = await confirmDanger(`确定删除工作区「${nb.name}」？将移入回收站，可随时恢复。`)
+    if (!ok) return
     await deleteNotebook(nb.id)
     studio.clearChat(nb.id)
     if (studio.currentNotebook?.id === nb.id) {

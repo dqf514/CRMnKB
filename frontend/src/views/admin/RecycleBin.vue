@@ -59,7 +59,8 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useThemeStore } from '../../stores/theme'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
 import { getRecycleBin, restoreRecycleItem, deleteRecycleItem, purgeRecycleBatch } from '../../api'
 import { formatDateTime } from '../../utils/format'
 
@@ -112,11 +113,12 @@ async function handleRestore(row) {
 }
 
 async function handlePurge(row) {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `彻底删除后不可恢复，确定彻底删除「${row.name}」吗？`,
     '彻底删除确认',
     { type: 'error', confirmButtonText: '彻底删除' }
   )
+  if (!ok) return
   await deleteRecycleItem(row.type, row.id)
   ElMessage.success('已彻底删除')
   loadList()
@@ -124,11 +126,12 @@ async function handlePurge(row) {
 
 async function handleBatchPurge() {
   if (!selection.value.length) return
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `将彻底删除所选 ${selection.value.length} 项（含磁盘文件与知识库切片），不可恢复。确定继续吗？`,
     '批量彻底删除确认',
     { type: 'error', confirmButtonText: '全部彻底删除' }
   )
+  if (!ok) return
   batchPurging.value = true
   try {
     const res = await purgeRecycleBatch(

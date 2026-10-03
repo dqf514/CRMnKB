@@ -12,10 +12,10 @@
         </div>
       </el-form-item>
       <el-form-item label="自定义 Logo">
-        <el-upload :show-file-list="false" :auto-upload="false" accept=".png,.jpg,.jpeg,.webp,.svg" :on-change="onLogoChange">
+        <el-upload :show-file-list="false" :auto-upload="false" accept=".png,.jpg,.jpeg,.webp" :on-change="onLogoChange">
           <el-button :icon="Upload">选择图片</el-button>
         </el-upload>
-        <span class="hint">支持 png/jpg/jpeg/webp/svg，≤5MB；选择后即时预览，点「保存」生效</span>
+        <span class="hint">支持 png/jpg/jpeg/webp，≤5MB；选择后即时预览，点「保存」生效</span>
       </el-form-item>
     </el-form>
     <div class="footer">

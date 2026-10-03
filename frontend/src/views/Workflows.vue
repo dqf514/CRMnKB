@@ -118,7 +118,7 @@
             <el-input v-model="c.value" placeholder="值" style="flex: 1" />
             <el-button link type="danger" :icon="Delete" @click="form.conditions.splice(i, 1)" />
           </div>
-          <el-button :icon="Plus" size="small" @click="form.conditions.push({ _key: crypto.randomUUID(), field: 'industry', op: 'eq', value: '' })">
+          <el-button :icon="Plus" size="small" @click="form.conditions.push({ _key: genKey(), field: 'industry', op: 'eq', value: '' })">
             添加条件
           </el-button>
         </template>
@@ -216,7 +216,8 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { Plus, Delete, Present } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
 import {
   getWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, getWorkflowRuns,
 } from '../api'
@@ -232,6 +233,11 @@ const weekdays = [
   { value: 4, label: '周四' }, { value: 5, label: '周五' }, { value: 6, label: '周六' },
   { value: 7, label: '周日' },
 ]
+
+// crypto.randomUUID 仅在安全上下文（HTTPS/localhost）可用，http 局域网 IP 访问时兜底为时间戳+随机串
+function genKey() {
+  return globalThis.crypto?.randomUUID?.() ?? `k-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
 
 const loading = ref(false)
 const list = ref([])
@@ -293,7 +299,7 @@ function openForm(w) {
         time: w.trigger_config?.time || '09:00',
         weekday: w.trigger_config?.weekday ?? 1,
       },
-      conditions: (w.conditions || []).map((c) => ({ _key: crypto.randomUUID(), field: c.field, op: c.op, value: c.value })),
+      conditions: (w.conditions || []).map((c) => ({ _key: genKey(), field: c.field, op: c.op, value: c.value })),
       action_type: w.action_type,
       action: {
         subject: w.action_config?.subject || '',
@@ -415,7 +421,8 @@ async function handleRun(w) {
 }
 
 async function handleDelete(w) {
-  await ElMessageBox.confirm(`确定删除工作流「${w.name}」吗？`, '删除确认', { type: 'warning' })
+  const ok = await confirmDanger(`确定删除工作流「${w.name}」吗？`)
+  if (!ok) return
   await deleteWorkflow(w.id)
   ElMessage.success('删除成功')
   loadList()

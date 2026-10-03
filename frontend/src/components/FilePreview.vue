@@ -89,6 +89,7 @@
 import { ref, computed } from 'vue'
 import { Download, Document, Edit, Delete } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
 import * as mammoth from 'mammoth/mammoth.browser'
 import * as XLSX from 'xlsx'
 import {
@@ -124,11 +125,10 @@ async function handleRename() {
 
 async function handleDelete() {
   if (!props.file?.id) return
-  await ElMessageBox.confirm(
-    `确定删除文件「${props.file.file_name}」吗？文件及其在各知识库中的关联与切片将一并删除。`,
-    '删除确认',
-    { type: 'warning' }
+  const ok = await confirmDanger(
+    `确定删除文件「${props.file.file_name}」吗？文件及其在各知识库中的关联与切片将一并删除。`
   )
+  if (!ok) return
   await deleteLibraryFile(props.file.id)
   ElMessage.success('已删除')
   emit('update:modelValue', false)

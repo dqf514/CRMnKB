@@ -13,6 +13,12 @@
           </div>
 
           <el-table :data="list" v-loading="loading" stripe>
+            <template #empty>
+              <!-- 空态引导：无数据时给出一句提示 + 直达新建入口 -->
+              <el-empty :image-size="80" description="暂无任务，创建任务后可在这里统一跟踪进度">
+                <el-button type="primary" :icon="Plus" @click="openForm()">新增任务</el-button>
+              </el-empty>
+            </template>
             <el-table-column prop="title" label="标题" min-width="150" show-overflow-tooltip />
             <el-table-column label="关联客户" min-width="110" show-overflow-tooltip>
               <template #default="{ row }">{{ row.customer_name || '-' }}</template>
@@ -79,6 +85,12 @@
           </div>
 
           <el-table :data="rules" v-loading="rulesLoading" stripe>
+            <template #empty>
+              <!-- 空态引导：说明规则用途 + 直达新建入口 -->
+              <el-empty :image-size="80" description="暂无提醒规则，创建后系统会按条件自动生成任务">
+                <el-button type="warning" :icon="Plus" @click="openRuleForm()">新增规则</el-button>
+              </el-empty>
+            </template>
             <el-table-column prop="name" label="规则名称" min-width="140" show-overflow-tooltip />
             <el-table-column label="触发条件" min-width="150">
               <template #default="{ row }">
@@ -123,15 +135,15 @@
             <el-option v-for="(v, k) in taskPriorityMap" :key="k" :label="v.label" :value="k" />
           </el-select>
         </el-form-item>
-        <el-form-item label="关联客户">
+        <el-form-item label="关联客户" prop="customer_id">
           <el-select v-model="form.customer_id" style="width: 100%" clearable filterable placeholder="可选">
             <el-option v-for="c in customerOptions" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="截止时间">
+        <el-form-item label="截止时间" prop="due_date">
           <el-date-picker v-model="form.due_date" type="datetime" value-format="YYYY-MM-DDTHH:mm:ss" style="width: 100%" />
         </el-form-item>
-        <el-form-item label="描述">
+        <el-form-item label="描述" prop="description">
           <el-input v-model="form.description" type="textarea" :rows="3" placeholder="任务描述" />
         </el-form-item>
       </el-form>
@@ -177,7 +189,7 @@
 import { ref, reactive, onMounted, nextTick } from 'vue'
 import { useThemeStore } from '../stores/theme'
 import { Plus, VideoPlay, Download } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   getTasks, createTask, updateTask, completeTask, deleteTask,
   getReminderRules, createReminderRule, updateReminderRule, deleteReminderRule, runReminderRules,
@@ -188,6 +200,10 @@ import {
   enumLabel, enumTagType, formatDateTime, parseServerDate,
 } from '../utils/format'
 import { exportRowsToExcel } from '../utils/tableExport'
+import { usePagedFetch } from '../utils/usePagedFetch'
+import { confirmDanger } from '../utils/confirmDanger'
+import { validateForm } from '../utils/validateForm'
+import { applyFieldErrors } from '../utils/applyFieldErrors'
 
 // 服务器 UTC 时间 → 本地 naive 字符串（供 el-date-picker 显示）
 function toLocalPickerValue(val) {
@@ -207,7 +223,8 @@ function toServerIso(localStr) {
 const activeTab = ref('tasks')
 
 // ========== 任务列表 ==========
-const loading = ref(false)
+// 列表请求防竞态（序号法），loading 由 composable 管理
+const { loading, run: runFetch } = usePagedFetch()
 const list = ref([])
 
 function handleExport() {
@@ -232,16 +249,17 @@ function onSizeChange() {
 }
 
 async function loadList() {
-  loading.value = true
-  try {
-    const params = { page: query.page, page_size: query.page_size }
-    if (query.status) params.status = query.status
-    const res = await getTasks(params)
-    list.value = res.items || []
-    total.value = res.total || 0
-  } finally {
-    loading.value = false
-  }
+  await runFetch(
+    () => {
+      const params = { page: query.page, page_size: query.page_size }
+      if (query.status) params.status = query.status
+      return getTasks(params)
+    },
+    (res) => {
+      list.value = res.items || []
+      total.value = res.total || 0
+    }
+  )
 }
 
 function handleSearch() {
@@ -294,7 +312,7 @@ function openForm(row) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
     const data = {
@@ -305,12 +323,18 @@ async function handleSave() {
       due_date: toServerIso(form.due_date),
       description: form.description || null,
     }
-    if (form.id) {
-      await updateTask(form.id, data)
-      ElMessage.success('更新成功')
-    } else {
-      await createTask(data)
-      ElMessage.success('创建成功')
+    try {
+      if (form.id) {
+        await updateTask(form.id, data)
+        ElMessage.success('更新成功')
+      } else {
+        await createTask(data)
+        ElMessage.success('创建成功')
+      }
+    } catch (e) {
+      // 后端 422 字段级错误：就地标红对应表单项（拦截器另给一句总提示），不再继续
+      if (applyFieldErrors(e, formRef.value)) return
+      throw e
     }
     formDialog.value = false
     loadList()
@@ -320,14 +344,14 @@ async function handleSave() {
 }
 
 async function handleComplete(row) {
-  await ElMessageBox.confirm(`确定将任务「${row.title}」标记为已完成吗？`, '提示', { type: 'info' })
+  if (!(await confirmDanger(`确定将任务「${row.title}」标记为已完成吗？`, '提示', { type: 'info' }))) return
   await completeTask(row.id)
   ElMessage.success('已完成')
   loadList()
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm(`确定删除任务「${row.title}」吗？`, '删除确认', { type: 'warning' })
+  if (!(await confirmDanger(`确定删除任务「${row.title}」吗？`))) return
   await deleteTask(row.id)
   ElMessage.success('删除成功')
   loadList()
@@ -408,7 +432,7 @@ function buildRulePayload() {
 }
 
 async function handleSaveRule() {
-  await ruleFormRef.value.validate()
+  if (!(await validateForm(ruleFormRef.value))) return
   ruleSaving.value = true
   try {
     if (ruleForm.id) {
@@ -438,7 +462,7 @@ async function toggleRule(row, val) {
 }
 
 async function handleDeleteRule(row) {
-  await ElMessageBox.confirm(`确定删除规则「${row.name}」吗？`, '删除确认', { type: 'warning' })
+  if (!(await confirmDanger(`确定删除规则「${row.name}」吗？`))) return
   await deleteReminderRule(row.id)
   ElMessage.success('删除成功')
   loadRules()

@@ -77,7 +77,10 @@
       <template #header>
         <div class="card-head">
           <span class="card-title">备份与恢复</span>
-          <div>
+          <div style="display: flex; align-items: center; gap: 12px">
+            <!-- 定时自动备份：开启后每个 UTC 日自动备份一次（服务端按日去重） -->
+            <span class="pref-tip" style="margin: 0">每日自动备份</span>
+            <el-switch v-model="autoBackup" :loading="autoBackupBusy" @change="handleAutoBackupChange" />
             <el-button size="small" :icon="Plus" :loading="backingUp" @click="handleBackup">立即备份</el-button>
             <el-button size="small" :icon="Refresh" @click="loadBackups">刷新</el-button>
           </div>
@@ -139,7 +142,8 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Refresh, Delete, MagicStick, Plus, Files } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getSystemOverview, runMaintenance, createBackup, getBackups, restoreBackup, resetSandbox } from '../../api'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { getSystemOverview, runMaintenance, createBackup, getBackups, restoreBackup, resetSandbox, getAutoBackup, setAutoBackup } from '../../api'
 import { useBrandStore } from '../../stores/brand'
 import { formatUptime, formatFileSize, formatDateTime } from '../../utils/format'
 
@@ -179,6 +183,28 @@ const data = ref({})
 const maintaining = ref(false)
 const backups = ref([])
 const backingUp = ref(false)
+// 每日自动备份开关状态
+const autoBackup = ref(false)
+const autoBackupBusy = ref(false)
+
+async function loadAutoBackup() {
+  try {
+    const res = await getAutoBackup()
+    autoBackup.value = !!res?.enabled
+  } catch { /* 拦截器已提示 */ }
+}
+
+async function handleAutoBackupChange(val) {
+  autoBackupBusy.value = true
+  try {
+    await setAutoBackup(val)
+    ElMessage.success(val ? '已开启每日自动备份' : '已关闭每日自动备份')
+  } catch {
+    autoBackup.value = !val  // 失败回滚开关
+  } finally {
+    autoBackupBusy.value = false
+  }
+}
 let timer = null
 
 async function loadBackups() {
@@ -199,11 +225,12 @@ async function handleBackup() {
 }
 
 async function handleRestore(row) {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定从备份「${row.name}」恢复吗？将覆盖当前数据库与上传目录，不可撤销。`,
     '恢复确认',
     { type: 'error', confirmButtonText: '确认恢复' }
   )
+  if (!ok) return
   await restoreBackup(row.name)
   ElMessage.success('已开始恢复（后台执行，完成后请刷新页面）')
 }
@@ -306,6 +333,7 @@ async function load() {
 onMounted(() => {
   load()
   loadBackups()
+  loadAutoBackup()
   timer = setInterval(load, 30000)
 })
 

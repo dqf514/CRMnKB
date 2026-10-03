@@ -29,7 +29,12 @@ request.interceptors.response.use(
       }
     } else {
       const detail = error.response?.data?.detail
-      ElMessage.error(typeof detail === 'string' ? detail : '请求失败，请稍后重试')
+      if (status === 422 && Array.isArray(detail)) {
+        // 422 字段级错误：各表单通过 applyFieldErrors 就地标红，这里只给一句总提示
+        ElMessage.error('提交内容校验未通过，请检查表单中标红的字段')
+      } else {
+        ElMessage.error(typeof detail === 'string' ? detail : '请求失败，请稍后重试')
+      }
     }
     return Promise.reject(error)
   }
@@ -269,6 +274,9 @@ export const runMaintenance = (action) => request.post('/api/v1/admin/system/mai
 export const createBackup = () => request.post('/api/v1/admin/system/backups')
 export const getBackups = () => request.get('/api/v1/admin/system/backups')
 export const restoreBackup = (name) => request.post(`/api/v1/admin/system/backups/${name}/restore`)
+// 定时自动备份开关（默认关；开启后每个 UTC 日自动备份一次）
+export const getAutoBackup = () => request.get('/api/v1/admin/system/auto-backup')
+export const setAutoBackup = (enabled) => request.put('/api/v1/admin/system/auto-backup', null, { params: { enabled } })
 // 沙箱数据重置（危险操作，仅 dev/sandbox 环境可用）
 export const resetSandbox = () => request.post('/api/v1/admin/system/reset-sandbox')
 

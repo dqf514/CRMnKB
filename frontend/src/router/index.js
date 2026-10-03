@@ -162,6 +162,17 @@ const routes = [
         component: () => import('../views/admin/SystemSettings.vue'),
         meta: { title: '系统设置', admin: true },
       },
+      // 老路径兼容：模型生成的站内链接常写 /kbs、/notebooks，重定向到现行路由
+      { path: 'kbs', redirect: '/knowledge' },
+      { path: 'kbs/:id', redirect: (to) => `/knowledge/${to.params.id}` },
+      { path: 'notebooks', redirect: '/studio' },
+      // 兜底 404：必须放最后
+      {
+        path: ':pathMatch(.*)*',
+        name: 'NotFound',
+        component: () => import('../views/NotFound.vue'),
+        meta: { title: '页面不存在' },
+      },
     ],
   },
 ]
@@ -179,13 +190,18 @@ router.beforeEach((to) => {
   if (token && to.path === '/login') {
     return '/today'
   }
+  let cachedUser = null
+  try {
+    cachedUser = JSON.parse(localStorage.getItem('user') || 'null')
+  } catch { /* 忽略 */ }
+  // 首登强制改密（如种子 admin）：除个人中心/登录页外一律拦截到改密页
+  if (token && cachedUser?.must_change_password && to.path !== '/profile') {
+    ElMessage.warning('首次登录请先修改初始密码')
+    return '/profile'
+  }
   // 系统管理页仅 admin 可访问
   if (to.matched.some((r) => r.meta?.admin)) {
-    let role = null
-    try {
-      role = JSON.parse(localStorage.getItem('user') || 'null')?.role
-    } catch { /* 忽略 */ }
-    if (role !== 'admin') {
+    if (cachedUser?.role !== 'admin') {
       ElMessage.warning('系统管理仅管理员可访问')
       return '/customers'
     }

@@ -1,6 +1,6 @@
 <template>
   <el-container class="layout">
-    <!-- 桌面端固定侧边栏（240px，Manus 风：品牌 → 新的任务/搜索 → 工作区列表 → 底部导航 → 用户行） -->
+    <!-- 桌面端固定侧边栏（240px，Manus 风：品牌 → 新的工作区/搜索 → 工作区列表 → 底部导航 → 用户行） -->
     <el-aside v-if="!isMobile" width="240px" class="aside">
       <!-- 品牌行 -->
       <div class="brand">
@@ -8,11 +8,11 @@
         <span class="brand-name">{{ brandStore.systemName }}</span>
       </div>
 
-      <!-- 主操作：新的任务 + 搜索 -->
+      <!-- 主操作：新的工作区 + 搜索 -->
       <div class="side-actions">
         <button class="btn-new-task" @click="createNewTask">
           <el-icon :size="15"><Plus /></el-icon>
-          <span>新的任务</span>
+          <span>新的工作区</span>
         </button>
         <button class="btn-search" @click="openGlobalSearch">
           <el-icon :size="15"><Search /></el-icon>
@@ -268,6 +268,7 @@ import {
   Stamp, Back,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
 import { useAuthStore } from '../stores/auth'
 import { useBrandStore } from '../stores/brand'
 import { useThemeStore } from '../stores/theme'
@@ -354,9 +355,9 @@ function goBackFromAdmin() {
 }
 
 // ========== 侧栏主操作 ==========
-// 「新的任务」：新建工作区并跳到工作台（沿用 Studio 原 TopBar 的新建逻辑）
+// 「新的工作区」：新建工作区并跳到工作台（沿用 Studio 原 TopBar 的新建逻辑）
 async function createNewTask() {
-  const { value: name } = await ElMessageBox.prompt('输入新工作区名称', '新的任务', {
+  const { value: name } = await ElMessageBox.prompt('输入新工作区名称', '新的工作区', {
     inputPattern: /.+/,
     inputErrorMessage: '名称不能为空',
     inputPlaceholder: '如：Q3 客户投诉分析',
@@ -505,7 +506,8 @@ async function handleCommand(cmd) {
       if (err?.response?.status === 404) ElMessage.warning('同步客户端尚未发布，请联系管理员')
     }
   } else if (cmd === 'logout') {
-    await ElMessageBox.confirm('确定退出登录吗？', '提示', { type: 'warning' })
+    const ok = await confirmDanger('确定退出登录吗？', '提示')
+    if (!ok) return
     authStore.logout()
     router.push('/login')
   }

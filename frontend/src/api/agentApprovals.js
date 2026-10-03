@@ -7,3 +7,6 @@ export const getAgentApprovals = (params) => request.get('/api/v1/agent-approval
 
 // 审批决策：data = { decision: 'approve' | 'reject', reason?: string }
 export const decideAgentApproval = (id, data) => request.post(`/api/v1/agent-approvals/${id}/decide`, data)
+
+// 重试执行失败的审批单（仅 admin，仅 failed 态）
+export const retryAgentApproval = (id) => request.post(`/api/v1/agent-approvals/${id}/retry`)

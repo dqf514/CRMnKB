@@ -385,13 +385,15 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, Plus, Upload, UploadFilled, Loading, Refresh, Message, Edit, Delete,
   Phone, ChatDotRound, Location, Link, Present, Clock,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
+import { validateForm } from '../utils/validateForm'
 import {
   getCustomer, updateCustomer, deleteCustomer, getFollowups, createFollowup,
   getOpportunities, createOpportunity, deleteOpportunity,
@@ -418,7 +420,8 @@ const docCategoryStore = useDocCategoryStore()
 
 const route = useRoute()
 const router = useRouter()
-const customerId = route.params.id
+// 用 let 以便路由 id 变化时更新（同一路由不同 id 跳转时组件被复用）
+let customerId = route.params.id
 
 const loading = ref(false)
 const customer = ref(null)
@@ -427,7 +430,8 @@ const opportunities = ref([])
 const editVisible = ref(false)
 
 async function handleDelete() {
-  await ElMessageBox.confirm(`确定删除客户「${customer.value?.name}」吗？`, '删除确认', { type: 'warning' })
+  const ok = await confirmDanger(`确定删除客户「${customer.value?.name}」吗？`)
+  if (!ok) return
   await deleteCustomer(customerId)
   ElMessage.success('删除成功')
   router.push('/customers')
@@ -459,6 +463,13 @@ function openOppDialog() {
 const oppRules = {
   name: [{ required: true, message: '请输入商机名称', trigger: 'blur' }],
   stage: [{ required: true, message: '请选择阶段', trigger: 'change' }],
+  // 金额不允许负数（el-input-number :min 只在步进/失焦时钳制，这里兜底校验）
+  amount: [
+    {
+      validator: (r, v, cb) => (v == null || v >= 0 ? cb() : cb(new Error('金额不能为负数'))),
+      trigger: 'blur',
+    },
+  ],
 }
 
 async function loadAll() {
@@ -479,7 +490,7 @@ async function loadAll() {
 }
 
 async function handleSaveFollowup() {
-  await followupFormRef.value.validate()
+  if (!(await validateForm(followupFormRef.value))) return
   followupSaving.value = true
   try {
     await createFollowup(customerId, {
@@ -500,7 +511,7 @@ async function handleSaveFollowup() {
 }
 
 async function handleSaveOpp() {
-  await oppFormRef.value.validate()
+  if (!(await validateForm(oppFormRef.value))) return
   oppSaving.value = true
   try {
     await createOpportunity({
@@ -522,7 +533,8 @@ async function handleSaveOpp() {
 }
 
 async function handleDeleteOpp(row) {
-  await ElMessageBox.confirm(`确定删除商机「${row.name}」吗？`, '删除确认', { type: 'warning' })
+  const ok = await confirmDanger(`确定删除商机「${row.name}」吗？`)
+  if (!ok) return
   await deleteOpportunity(row.id)
   ElMessage.success('删除成功')
   const o = await getOpportunities({ customer_id: customerId })
@@ -639,7 +651,7 @@ function openTaskDialog() {
 }
 
 async function handleSaveTask() {
-  await taskFormRef.value.validate()
+  if (!(await validateForm(taskFormRef.value))) return
   taskSaving.value = true
   try {
     await createTask({
@@ -840,6 +852,15 @@ onMounted(() => {
   loadProfile()
   initUploadFormats()
   docCategoryStore.load()
+})
+// 同一路由不同客户 id 之间跳转时组件复用、onMounted 不再触发，监听 id 变化重新加载
+watch(() => route.params.id, (id) => {
+  if (!id || String(id) === String(customerId)) return
+  customerId = id
+  loadAll()
+  loadCustomerFiles()
+  loadCustomerTasks()
+  loadProfile()
 })
 onUnmounted(() => {
   clearProfilePoll()

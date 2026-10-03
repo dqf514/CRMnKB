@@ -47,7 +47,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { validateForm } from '../../utils/validateForm'
 import { getAdminGroups, createAdminGroup, updateAdminGroup, deleteAdminGroup } from '../../api'
 import { formatDateTime } from '../../utils/format'
 
@@ -84,7 +86,7 @@ function openForm(row) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
     const data = { name: form.name, description: form.description || null }
@@ -103,11 +105,8 @@ async function handleSave() {
 }
 
 async function handleDelete(row) {
-  try {
-    await ElMessageBox.confirm(`确定删除分组「${row.name}」吗？`, '删除确认', { type: 'warning' })
-  } catch {
-    return
-  }
+  const ok = await confirmDanger(`确定删除分组「${row.name}」吗？`)
+  if (!ok) return
   try {
     await deleteAdminGroup(row.id)
     ElMessage.success('删除成功')

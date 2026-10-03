@@ -43,6 +43,10 @@
             <el-option v-for="c in customerOptions" :key="c.id" :label="c.name" :value="c.id" />
           </el-select>
         </el-form-item>
+        <!-- 自定义类型必须填报告需求，否则后端 400 -->
+        <el-form-item v-else-if="genForm.type === 'custom'" label="报告需求" prop="prompt">
+          <el-input v-model="genForm.prompt" type="textarea" :rows="3" placeholder="如：基于产品资料库生成一份竞品对比分析报告" />
+        </el-form-item>
         <el-form-item v-else label="日期范围" prop="dateRange">
           <el-date-picker
             v-model="genForm.dateRange"
@@ -212,7 +216,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { Plus, Loading, MagicStick, Upload, CircleCheck, Printer, FullScreen, Close } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import {
   generateReport, getReports, getReport, deleteReport, getCustomers,
   getKbs, getKbDocuments, getWorkbenchKb, reviseReport, exportReportPdf, exportReportPresentationPdf,
@@ -220,6 +224,8 @@ import {
 import { uploadLibraryFiles } from '../../api/libraryUpload'
 import { renderMarkdown } from '../../utils/markdown'
 import { reportTypeMap, reportStatusMap, enumLabel, enumTagType, formatDateTime } from '../../utils/format'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { validateForm } from '../../utils/validateForm'
 import { useBrandStore } from '../../stores/brand'
 
 const brandStore = useBrandStore()
@@ -233,11 +239,12 @@ const total = ref(0)
 const genDialog = ref(false)
 const generating = ref(false)
 const genFormRef = ref()
-const genForm = reactive({ type: 'customer_analysis', customer_id: null, dateRange: null, timeout: 180, language: 'zh', agent: false })
+const genForm = reactive({ type: 'customer_analysis', customer_id: null, dateRange: null, prompt: '', timeout: 180, language: 'zh', agent: false })
 const genRules = {
   type: [{ required: true, message: '请选择报告类型', trigger: 'change' }],
   customer_id: [{ required: true, message: '请选择客户', trigger: 'change' }],
   dateRange: [{ required: true, message: '请选择日期范围', trigger: 'change' }],
+  prompt: [{ required: true, message: '请描述报告需求', trigger: 'blur' }],
 }
 const customerOptions = ref([])
 
@@ -292,17 +299,18 @@ async function loadCustomerOptions() {
 }
 
 function openGenerate() {
-  Object.assign(genForm, { type: 'customer_analysis', customer_id: null, dateRange: null, timeout: 180, language: 'zh', agent: false })
+  Object.assign(genForm, { type: 'customer_analysis', customer_id: null, dateRange: null, prompt: '', timeout: 180, language: 'zh', agent: false })
   genDialog.value = true
   nextTick(() => genFormRef.value?.clearValidate())
 }
 
 async function handleGenerate() {
-  await genFormRef.value.validate()
+  if (!(await validateForm(genFormRef.value))) return
   generating.value = true
   try {
     const data = { type: genForm.type, timeout: genForm.timeout, language: genForm.language }
     if (genForm.type === 'customer_analysis') data.customer_id = genForm.customer_id
+    else if (genForm.type === 'custom') data.prompt = genForm.prompt.trim()
     else { data.start_date = genForm.dateRange?.[0]; data.end_date = genForm.dateRange?.[1] }
     if (genForm.agent) data.agent = true
     await generateReport(data)
@@ -385,7 +393,7 @@ async function pollAttachments() {
 }
 
 async function handleCompose() {
-  await composeFormRef.value.validate()
+  if (!(await validateForm(composeFormRef.value))) return
   composing.value = true
   try {
     const data = { type: 'custom', prompt: composeForm.prompt.trim(), timeout: composeForm.timeout, language: composeForm.language }
@@ -523,7 +531,7 @@ async function handleDownloadPdf() {
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm(`确定删除报告「${row.title}」吗？`, '删除确认', { type: 'warning' })
+  if (!(await confirmDanger(`确定删除报告「${row.title}」吗？`))) return
   await deleteReport(row.id)
   ElMessage.success('删除成功')
   loadList()

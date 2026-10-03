@@ -86,6 +86,8 @@ import { ElMessage } from 'element-plus'
 import { createCustomer, updateCustomer, getCustomerDuplicates } from '../api'
 import { useIndustryStore } from '../stores/industries'
 import { customerStatusMap, CUSTOMER_TAG_PRESETS } from '../utils/format'
+import { validateForm } from '../utils/validateForm'
+import { applyFieldErrors } from '../utils/applyFieldErrors'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -172,7 +174,7 @@ function goCustomer(id) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
     const data = {
@@ -189,12 +191,18 @@ async function handleSave() {
       source: form.source,
       birthday: form.birthday || null,
     }
-    if (form.id) {
-      await updateCustomer(form.id, data)
-      ElMessage.success('更新成功')
-    } else {
-      await createCustomer(data)
-      ElMessage.success('创建成功')
+    try {
+      if (form.id) {
+        await updateCustomer(form.id, data)
+        ElMessage.success('更新成功')
+      } else {
+        await createCustomer(data)
+        ElMessage.success('创建成功')
+      }
+    } catch (e) {
+      // 后端 422 字段级错误：就地标红对应表单项（拦截器另给一句总提示），不再继续
+      if (applyFieldErrors(e, formRef.value)) return
+      throw e
     }
     emit('update:modelValue', false)
     emit('saved')

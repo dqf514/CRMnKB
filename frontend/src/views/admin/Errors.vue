@@ -64,7 +64,8 @@
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
 import { useThemeStore } from '../../stores/theme'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
 import { getAdminErrors, resolveAdminError, resolveAllAdminErrors } from '../../api'
 import { errorLevelMap, enumLabel, enumTagType, formatDateTime } from '../../utils/format'
 
@@ -106,7 +107,8 @@ async function handleResolve(row) {
 }
 
 async function handleResolveAll() {
-  await ElMessageBox.confirm('确定将全部异常日志标记为已解决吗？', '提示', { type: 'warning' })
+  const ok = await confirmDanger('确定将全部异常日志标记为已解决吗？', '提示')
+  if (!ok) return
   resolvingAll.value = true
   try {
     await resolveAllAdminErrors()

@@ -5,10 +5,10 @@
       <span class="title">工作区 ({{ notes.length }})</span>
       <el-button-group>
         <el-tooltip content="新建工作区">
-          <el-button :icon="Plus" size="small" link @click="onNew" />
+          <el-button :icon="Plus" size="small" link aria-label="新建工作区" @click="onNew" />
         </el-tooltip>
         <el-tooltip content="刷新">
-          <el-button :icon="Refresh" size="small" link @click="refresh" />
+          <el-button :icon="Refresh" size="small" link aria-label="刷新" @click="refresh" />
         </el-tooltip>
       </el-button-group>
     </div>
@@ -37,16 +37,16 @@
         <el-input v-model="titleDraft" placeholder="工作区标题" size="small" class="title-input" />
         <el-button-group>
           <el-tooltip content="预览">
-            <el-button :icon="View" size="small" link @click="previewMode = !previewMode" />
+            <el-button :icon="View" size="small" link aria-label="预览" @click="previewMode = !previewMode" />
           </el-tooltip>
           <el-tooltip content="保存">
-            <el-button :icon="Check" size="small" type="primary" link :loading="saving" @click="saveNote" />
+            <el-button :icon="Check" size="small" type="primary" link aria-label="保存" :loading="saving" @click="saveNote" />
           </el-tooltip>
           <el-tooltip content="保存为知识库文档">
-            <el-button :icon="Promotion" size="small" link @click="saveAsDocumentDialog" />
+            <el-button :icon="Promotion" size="small" link aria-label="保存为知识库文档" @click="saveAsDocumentDialog" />
           </el-tooltip>
           <el-tooltip content="删除">
-            <el-button :icon="Delete" size="small" link @click="deleteNote" />
+            <el-button :icon="Delete" size="small" link aria-label="删除" @click="deleteNote" />
           </el-tooltip>
         </el-button-group>
       </div>
@@ -92,7 +92,8 @@ import { ref, computed, watch } from 'vue'
 import {
   Plus, Refresh, View, Check, Promotion, Delete,
 } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
 import { useStudioStore } from '../../stores/studio'
 import { renderMarkdown } from '../../utils/markdown'
 import { parseServerDate } from '../../utils/format'
@@ -137,7 +138,7 @@ async function onNew() {
     return
   }
   await studio.createNote({
-    title: '新工作区',
+    title: '新笔记',
     content: '',
     source_type: 'manual',
     source_ref: null,
@@ -165,7 +166,7 @@ async function saveNote() {
 
 async function deleteNote() {
   if (!selectedNote.value) return
-  await ElMessageBox.confirm(`确定删除工作区「${selectedNote.value.title}」吗？`, '删除确认', { type: 'warning' })
+  if (!(await confirmDanger(`确定删除笔记「${selectedNote.value.title}」吗？`))) return
   await studio.deleteNote(selectedNote.value.id)
   ElMessage.success('已删除')
 }
@@ -265,7 +266,7 @@ async function confirmSaveAsDocument() {
   white-space: nowrap;
 }
 .note-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--app-ink-2);
 }
 .editor {
@@ -315,7 +316,7 @@ async function confirmSaveAsDocument() {
 .editor-meta {
   display: flex;
   gap: 12px;
-  font-size: 11px;
+  font-size: 12px;
   color: var(--app-ink-2);
   margin-top: 8px;
 }

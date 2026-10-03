@@ -41,6 +41,10 @@
             <el-button type="success" size="small" :loading="decidingId === a.id" @click="handleApprove(a)">批准并执行</el-button>
             <el-button type="danger" size="small" plain :loading="decidingId === a.id" @click="handleReject(a)">拒绝</el-button>
           </div>
+          <!-- 执行失败的审批单可重试（仅 admin） -->
+          <div v-if="isAdmin && a.status === 'failed'" class="appr-actions">
+            <el-button type="warning" size="small" :loading="retryingId === a.id" @click="handleRetry(a)">重试执行</el-button>
+          </div>
         </div>
       </div>
     </el-card>
@@ -51,7 +55,8 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getAgentApprovals, decideAgentApproval } from '../api/agentApprovals'
+import { confirmDanger } from '../utils/confirmDanger'
+import { getAgentApprovals, decideAgentApproval, retryAgentApproval } from '../api/agentApprovals'
 import { agentApprovalStatusMap, toolNameMap, enumLabel, enumTagType, formatDateTime } from '../utils/format'
 import { useAuthStore } from '../stores/auth'
 
@@ -61,6 +66,7 @@ const isAdmin = computed(() => authStore.user?.role === 'admin')
 const list = ref([])
 const loading = ref(false)
 const decidingId = ref(null)
+const retryingId = ref(null)
 // 默认看待审批（最需要处理的）；审批单可能由他人决策，轮询保持状态新鲜
 const queryStatus = ref('pending')
 
@@ -120,10 +126,11 @@ function argValueText(v) {
 }
 
 async function handleApprove(a) {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定批准「${a.summary}」吗？批准后系统将立即执行该操作。`,
-    '批准确认', { type: 'warning' }
+    '批准确认'
   )
+  if (!ok) return
   await decide(a, 'approve')
 }
 
@@ -146,6 +153,23 @@ async function decide(a, decision, reason) {
     await loadList()
   } finally {
     decidingId.value = null
+  }
+}
+
+// 重试执行失败的审批单：后端条件 UPDATE 抢占防并发，重复点击安全
+async function handleRetry(a) {
+  const ok = await confirmDanger(
+    `确定重试「${a.summary}」吗？系统将重新执行该操作。`,
+    '重试确认'
+  )
+  if (!ok) return
+  retryingId.value = a.id
+  try {
+    await retryAgentApproval(a.id)
+    ElMessage.success('已重新执行')
+    await loadList()
+  } finally {
+    retryingId.value = null
   }
 }
 

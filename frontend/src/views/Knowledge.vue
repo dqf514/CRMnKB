@@ -76,7 +76,9 @@
 import { ref, computed, reactive, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { Plus, User, View, Share } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
+import { validateForm } from '../utils/validateForm'
 import { getKbs, createKb, updateKb, deleteKb } from '../api'
 import { useAuthStore } from '../stores/auth'
 import { kbTypeMap, enumLabel, enumTagType, formatDate } from '../utils/format'
@@ -135,7 +137,7 @@ function openForm(kb) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
     const data = { name: form.name, description: form.description || null }
@@ -154,11 +156,12 @@ async function handleSave() {
 }
 
 async function handleDelete(kb) {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定删除知识库「${kb.name}」吗？其中的文档关联与切片将一并删除，但不会删除文档库中的文件。`,
     '删除确认',
-    { type: 'warning', confirmButtonText: '删除' }
+    { confirmButtonText: '删除' }
   )
+  if (!ok) return
   await deleteKb(kb.id)
   ElMessage.success('删除成功')
   loadList()

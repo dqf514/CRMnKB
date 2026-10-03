@@ -7,8 +7,6 @@
           placeholder="搜索用户名 / 姓名"
           style="width: 220px"
           clearable
-          @keyup.enter="handleSearch"
-          @clear="handleSearch"
         />
         <el-select v-model="query.group_id" placeholder="分组筛选" style="width: 150px" clearable @change="handleSearch">
           <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
@@ -122,7 +120,10 @@
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useThemeStore } from '../../stores/theme'
 import { Search, Plus } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { watchDebounced } from '../../utils/watchDebounced'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { validateForm } from '../../utils/validateForm'
 import {
   getAdminUsers, createAdminUser, updateAdminUser, resetAdminUserPassword, deleteAdminUser, getAdminGroups,
 } from '../../api'
@@ -164,6 +165,9 @@ function handleSearch() {
   loadList()
 }
 
+// 关键字防抖即搜（300ms）：输入停顿或清空后自动搜索，无需回车
+watchDebounced(() => query.keyword, handleSearch)
+
 async function loadGroups() {
   try {
     const res = await getAdminGroups()
@@ -204,7 +208,7 @@ function openForm(row) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
     if (form.id) {
@@ -263,7 +267,7 @@ function openResetPwd(row) {
 }
 
 async function handleResetPwd() {
-  await pwdFormRef.value.validate()
+  if (!(await validateForm(pwdFormRef.value))) return
   pwdSaving.value = true
   try {
     await resetAdminUserPassword(pwdTarget.value.id, pwdForm.new_password)
@@ -275,7 +279,8 @@ async function handleResetPwd() {
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm(`确定删除用户「${row.username}」吗？`, '删除确认', { type: 'warning' })
+  const ok = await confirmDanger(`确定删除用户「${row.username}」吗？`)
+  if (!ok) return
   await deleteAdminUser(row.id)
   ElMessage.success('删除成功')
   loadList()

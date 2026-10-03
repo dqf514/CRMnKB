@@ -110,7 +110,9 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { confirmDanger } from '../../utils/confirmDanger'
+import { validateForm } from '../../utils/validateForm'
 import {
   getLlmModels, createLlmModel, updateLlmModel, deleteLlmModel, setLlmModelDefault, testLlmModel,
   fetchRemoteModels, testLlmConfig,
@@ -260,7 +262,7 @@ function openForm(row) {
 }
 
 async function handleSave() {
-  await formRef.value.validate()
+  if (!(await validateForm(formRef.value))) return
   saving.value = true
   try {
     const data = {
@@ -315,7 +317,8 @@ async function handleTest(row) {
 }
 
 async function handleDelete(row) {
-  await ElMessageBox.confirm(`确定删除模型配置「${row.name}」吗？`, '删除确认', { type: 'warning' })
+  const ok = await confirmDanger(`确定删除模型配置「${row.name}」吗？`)
+  if (!ok) return
   await deleteLlmModel(row.id)
   ElMessage.success('删除成功')
   loadList()

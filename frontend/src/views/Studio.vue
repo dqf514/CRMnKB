@@ -258,7 +258,8 @@ const router = useRouter()
 // 消息区链接点击拦截：站内路径（如 /customers/5）走前端路由不整页刷新；外链新标签打开。
 // 模型有时会把相对 url 脑补成绝对地址（http://host/customers/5），
 // 因此 http(s) 链接的路径命中站内路由前缀时也按内链处理
-const INTERNAL_PREFIXES = ['/customers', '/library', '/kbs', '/notebooks', '/reports']
+// 注意与 router 现行路由保持一致：知识库为 /knowledge（/kbs 等老路径由路由重定向兼容）
+const INTERNAL_PREFIXES = ['/customers', '/library', '/knowledge', '/kbs', '/notebooks', '/reports']
 
 function onMsgClick(e) {
   const a = e.target.closest('a')

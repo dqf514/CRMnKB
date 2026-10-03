@@ -88,8 +88,6 @@
             clearable
             size="small"
             style="margin-bottom: 10px"
-            @keyup.enter="loadAssocFiles"
-            @clear="loadAssocFiles"
           >
             <template #append>
               <el-button :icon="Search" @click="loadAssocFiles" />
@@ -202,7 +200,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, Plus, Search, Loading, Aim, Edit, Delete, View, RefreshRight, MagicStick, List, Clock } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -212,6 +210,8 @@ import {
   updateKb, deleteKb,
 } from '../api'
 import { kbTypeMap, documentStatusMap, processingMethodMap, enumLabel, enumTagType, formatDateTime, formatFileSize } from '../utils/format'
+import { confirmDanger } from '../utils/confirmDanger'
+import { watchDebounced } from '../utils/watchDebounced'
 import { useThemeStore } from '../stores/theme'
 import FilePreview from '../components/FilePreview.vue'
 
@@ -225,7 +225,8 @@ function openPreview(row) {
 
 const route = useRoute()
 const router = useRouter()
-const kbId = route.params.id
+// 用 let 以便路由 id 变化时更新（同一路由不同 id 跳转时组件被复用）
+let kbId = route.params.id
 
 const kb = ref(null)
 const docs = ref([])
@@ -255,11 +256,12 @@ async function openRename() {
 }
 
 async function handleDeleteKb() {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定删除知识库「${kb.value?.name}」吗？其中的文档关联与切片将一并删除，但不会删除文档库中的文件。`,
     '删除确认',
-    { type: 'warning', confirmButtonText: '删除' }
+    { confirmButtonText: '删除' }
   )
+  if (!ok) return
   await deleteKb(kbId)
   ElMessage.success('已删除')
   router.push('/knowledge')
@@ -325,6 +327,12 @@ function selectFolder(id) {
   loadAssocFiles()
 }
 
+// 关键字防抖即搜（300ms）：输入停顿或清空后自动回到第一页重新加载
+watchDebounced(() => assocQuery.keyword, () => {
+  assocQuery.page = 1
+  loadAssocFiles()
+})
+
 async function loadAssocFiles() {
   assocLoading.value = true
   try {
@@ -380,11 +388,12 @@ async function viewVersion(v) {
 }
 
 async function restoreVersion(v) {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     '确定把该文档恢复到选中的历史版本吗？将用此版本内容重新解析并替换当前切片。',
     '恢复版本确认',
-    { type: 'warning', confirmButtonText: '恢复' }
+    { confirmButtonText: '恢复' }
   )
+  if (!ok) return
   await restoreDocVersion(kbId, versionsDoc.value.id, v.id)
   ElMessage.success('已提交恢复，后台解析中')
   versionsDialog.value = false
@@ -393,11 +402,11 @@ async function restoreVersion(v) {
 
 // ========== 移除 / 切片 ==========
 async function handleRemove(row) {
-  await ElMessageBox.confirm(
+  const ok = await confirmDanger(
     `确定将「${row.title}」从本知识库移除吗？仅移除关联与切片，不删除文档库文件。`,
-    '移除确认',
-    { type: 'warning' }
+    '移除确认'
   )
+  if (!ok) return
   await removeKbDocument(kbId, row.id)
   ElMessage.success('已移除')
   loadDocs()
@@ -485,6 +494,13 @@ async function runHitTest() {
 }
 
 onMounted(() => {
+  loadKb()
+  loadDocs()
+})
+// 同一路由不同知识库 id 之间跳转时组件复用、onMounted 不再触发，监听 id 变化重新加载
+watch(() => route.params.id, (id) => {
+  if (!id || String(id) === String(kbId)) return
+  kbId = id
   loadKb()
   loadDocs()
 })

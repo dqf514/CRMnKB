@@ -40,6 +40,14 @@
       <el-col :xs="24" :lg="14">
         <el-card>
           <template #header><span class="card-title">修改密码</span></template>
+          <el-alert
+            v-if="authStore.user?.must_change_password"
+            type="warning"
+            :closable="false"
+            title="首次登录请先修改初始密码"
+            description="当前账号仍在使用初始密码，修改完成后才能继续使用系统其他功能。"
+            style="margin-bottom: 12px"
+          />
           <el-form :model="pwdForm" :rules="pwdRules" ref="pwdFormRef" label-width="90px" style="max-width: 460px">
             <el-form-item label="旧密码" prop="old_password">
               <el-input v-model="pwdForm.old_password" type="password" show-password placeholder="当前密码" />
@@ -147,6 +155,8 @@ import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { Check, Camera, Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { confirmDanger } from '../utils/confirmDanger'
+import { validateForm } from '../utils/validateForm'
 import Cropper from 'cropperjs'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore, ACCENTS, FONT_SIZES } from '../stores/theme'
@@ -249,20 +259,18 @@ async function saveProfile() {
     ElMessage.warning('请填写姓名')
     return
   }
-  await profileFormRef.value.validate()
+  if (!(await validateForm(profileFormRef.value))) return
   profileSaving.value = true
   try {
-    let avatarUrl = profileForm.avatar_url || null
     if (pendingAvatarFile.value) {
+      // 头像只走上传端点（后端 MIME/魔数校验）；profile 接口不再接受 avatar_url
       const res = await uploadAvatar(pendingAvatarFile.value)
-      avatarUrl = res.avatar_url || null
-      profileForm.avatar_url = avatarUrl || ''
+      profileForm.avatar_url = res.avatar_url || ''
       if (pendingAvatar.value) URL.revokeObjectURL(pendingAvatar.value)
       pendingAvatar.value = ''
       pendingAvatarFile.value = null
     }
     await updateProfile({
-      avatar_url: avatarUrl,
       name: profileForm.name,
       email: profileForm.email || null,
       phone: profileForm.phone || null,
@@ -296,7 +304,7 @@ const pwdRules = {
 }
 
 async function savePassword() {
-  await pwdFormRef.value.validate()
+  if (!(await validateForm(pwdFormRef.value))) return
   pwdSaving.value = true
   try {
     await updatePassword({ old_password: pwdForm.old_password, new_password: pwdForm.new_password })
@@ -345,7 +353,8 @@ async function onAddMemory() {
     cancelButtonText: '取消',
     inputType: 'textarea',
     inputValidator: (v) => (v && v.trim() ? true : '内容不能为空'),
-  }).catch(() => Promise.reject(new Error('cancel')))
+  }).catch(() => ({ value: null }))
+  if (value == null) return
   await addMemory(value.trim())
   ElMessage.success('已保存')
   loadMemories()
@@ -358,29 +367,30 @@ async function onEditMemory(m) {
     inputType: 'textarea',
     inputValue: m.content,
     inputValidator: (v) => (v && v.trim() ? true : '内容不能为空'),
-  }).catch(() => Promise.reject(new Error('cancel')))
+  }).catch(() => ({ value: null }))
+  if (value == null) return
   await updateMemory(m.id, value.trim())
   ElMessage.success('已更新')
   loadMemories()
 }
 
 async function onDeleteMemory(m) {
-  await ElMessageBox.confirm(`删除这条记忆？\n「${m.content.slice(0, 50)}」`, '删除记忆', {
-    type: 'warning',
+  const ok = await confirmDanger(`删除这条记忆？\n「${m.content.slice(0, 50)}」`, '删除记忆', {
     confirmButtonText: '删除',
     cancelButtonText: '取消',
-  }).catch(() => Promise.reject(new Error('cancel')))
+  })
+  if (!ok) return
   await deleteMemory(m.id)
   ElMessage.success('已删除')
   loadMemories()
 }
 
 async function onClearMemories() {
-  await ElMessageBox.confirm(`确定清空全部 ${memories.value.length} 条记忆？此操作不可恢复。`, '清空记忆', {
-    type: 'warning',
+  const ok = await confirmDanger(`确定清空全部 ${memories.value.length} 条记忆？此操作不可恢复。`, '清空记忆', {
     confirmButtonText: '全部清空',
     cancelButtonText: '取消',
-  }).catch(() => Promise.reject(new Error('cancel')))
+  })
+  if (!ok) return
   const res = await clearMemories()
   ElMessage.success(`已清空 ${res?.deleted ?? 0} 条记忆`)
   loadMemories()

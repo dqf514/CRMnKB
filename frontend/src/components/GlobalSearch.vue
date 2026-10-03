@@ -46,6 +46,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search } from '@element-plus/icons-vue'
 import { globalSearch } from '../api'
+import { usePagedFetch } from '../utils/usePagedFetch'
 
 const router = useRouter()
 const visible = ref(false)
@@ -55,6 +56,8 @@ const inputRef = ref()
 const activeIdx = ref(0)
 const results = ref({})
 let debounceTimer = null
+// 搜索请求防竞态：快速输入时旧响应不得覆盖新结果（无需 loading 态）
+const { run: runFetch } = usePagedFetch()
 
 const GROUPS = [
   { key: 'customers', label: '客户', route: (id) => `/customers/${id}` },
@@ -95,9 +98,14 @@ async function doSearch() {
   const q = keyword.value.trim()
   if (!q) { searched.value = false; results.value = {}; return }
   try {
-    results.value = await globalSearch(q)
-    searched.value = true
-    activeIdx.value = 0
+    await runFetch(
+      () => globalSearch(q),
+      (res) => {
+        results.value = res
+        searched.value = true
+        activeIdx.value = 0
+      }
+    )
   } catch { /* 拦截器已提示 */ }
 }
 
