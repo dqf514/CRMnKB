@@ -47,5 +47,6 @@ else
 fi
 
 echo "== 3 秒后重启后端（$SERVICE） =="
-nohup bash -c "sleep 3 && systemctl restart $SERVICE" >/dev/null 2>&1 &
+# 重启走 sudo（脚本由服务用户 crmnkb 触发，需 /etc/sudoers.d/crmnkb 免密授权）
+nohup bash -c "sleep 3 && sudo systemctl restart $SERVICE" >/dev/null 2>&1 &
 echo "更新完成，后端即将重启（页面稍后刷新即可）"

@@ -1,0 +1,31 @@
+# 减小构建上下文；Dockerfile 只 COPY 以下内容，其余全部排除：
+#   app/  requirements.txt  docker-entrypoint.sh
+#   docker/dsh-base.yml  vendor/dsh-session-persistence-pg/
+
+# 本地虚拟环境与缓存
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+
+# 测试代码不进镜像
+tests/
+conftest.py
+pytest.ini
+requirements-dev.txt
+
+# 运行时数据（playwright 浏览器由镜像内 `playwright install` 安装到
+# /app/data/ms-playwright，不从本目录 COPY；uploads/brand/backups 等走 named volume）
+data/
+
+# 密钥与环境文件
+.env
+.env.*
+
+# 阶段 1 遗留的 vendor SDK（不再安装进镜像，见 Dockerfile 注释）
+vendor/deepseek-harness-sdk/
+
+# 镜像构建自描述文件
+Dockerfile
+.dockerignore

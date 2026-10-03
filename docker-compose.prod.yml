@@ -23,12 +23,18 @@ services:
     container_name: crmnkb-backend
     restart: unless-stopped
     env_file:
-      # 可选：没有 .env 时也能启动（全部走 config.py 默认值，模型后在管理端配置）
+      # 可选：没有 .env 时也能启动（模型后在管理端配置），但 ENV/JWT_SECRET 强制安全默认值
       - path: ./backend/.env
         required: false
     environment:
+      # 生产安全基线：ENV=prod 触发弱 JWT 拒绝启动/关闭沙箱重置等 dev 能力；
+      # JWT_SECRET 强制显式设置，杜绝默认密钥静默上线
+      ENV: prod
+      JWT_SECRET: ${JWT_SECRET:?请在根目录 .env 设置 JWT_SECRET（openssl rand -hex 32）}
       # 覆盖 .env 中的 localhost，指向容器网络内的 postgres
       DATABASE_URL: postgresql+asyncpg://crm:${POSTGRES_PASSWORD}@postgres:5432/crmnkb
+      # 容器内无 docker CLI：备份走容器内 pg_dump 网络连接（不要用 docker exec）
+      PG_DOCKER_CONTAINER: ""
       # dsh agent 基座（阶段 2 ACP）：镜像内置 Node + @deepseek-ai/dsh + PG 持久化插件。
       # 单租户单 ACP 进程；模型路由由进程级 patch（acp-model.yml）按 DB 默认 chat
       # 模型自动生成（llm-pi-ai kbcrm 路由），DSH_PROVIDER 已弃用无需配置。
@@ -40,6 +46,12 @@ services:
       # 由下方 dsh-home volume 持久化；DSH_MCP_URL 保持默认 http://127.0.0.1:8100/api/mcp
     volumes:
       - uploads:/app/data/uploads
+      # 品牌 logo / 备份产物 / 头像 / 同步客户端安装包 分开持久化
+      # （勿整目录挂载 /app/data，会覆盖镜像内的 playwright 浏览器）
+      - brand:/app/data/brand
+      - backups:/app/data/backups
+      - avatars:/app/data/avatars
+      - syncapp:/app/data/sync_app
       # dsh 运行时状态：acp profile（含插件注册）、进程级 patch yml、agent 工作区
       - dsh-home:/app/data/dsh
     depends_on:
@@ -58,4 +70,8 @@ services:
 volumes:
   pgdata:
   uploads:
+  brand:
+  backups:
+  avatars:
+  syncapp:
   dsh-home:
