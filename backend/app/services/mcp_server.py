@@ -38,6 +38,7 @@ from app.models.task import Task
 from app.models.user import User
 from app.services.agent_approvals import create_approval
 from app.services.llm import resolve_embed_llm
+from app.services.memory import add_memory, delete_memory, list_memories, search_memories
 from app.services.permissions import accessible_ids, get_access, satisfies
 from app.services.skills.registry import execute_skill, get_enabled_skills
 from app.services.rag import (
@@ -74,6 +75,8 @@ kb_mcp = FastMCP(
         "crm_search_customers 模糊检索客户、crm_get_customer 客户详情、"
         "crm_list_followups 跟进清单、crm_list_opportunities 商机清单、crm_list_tasks 任务清单、"
         "crm_stats 经营概览统计、skill_list 列出已启用自定义工具、web_search 联网搜索、web_fetch 抓取网页。"
+        "个人记忆：memory_list/memory_search 查用户长期记忆，memory_save 保存用户长期偏好/背景"
+        "（跨会话生效），memory_delete 删除错误记忆。"
         "写工具（crm_create_customer / crm_update_customer / crm_delete_customer / "
         "crm_create_opportunity / crm_create_task / crm_add_followup / mail_draft_create / "
         "skill_create_api）不直接生效，只创建审批单，管理员批准后由系统自动执行。"
@@ -1273,6 +1276,80 @@ async def _skill_create_api_tool(
             "parameters": parameters, "timeout": timeout,
         }
         return await skill_create_api_impl(db, user, args)
+
+
+# ---------------------------------------------------------------------------
+# 个人记忆工具（跨工作区长期记忆；严格按 user_id 隔离，无需审批——用户本人数据）
+# ---------------------------------------------------------------------------
+
+
+@kb_mcp.tool(
+    name="memory_save",
+    description=(
+        "保存一条当前用户的长期个人记忆（跨会话/跨工作区有效）。当用户透露长期偏好、身份背景、"
+        "常用约定（如「我是做 xx 行业的」「报告默认用中文」「以后都给我表格形式」）时主动调用；"
+        "一次性上下文（当前任务细节）不要存。内容限 500 字，重复内容自动去重。"
+    ),
+)
+async def _memory_save_tool(content: str, ctx: Context = None) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        try:
+            mem, created = await add_memory(db, user.id, content, source="agent")
+        except ValueError as exc:
+            raise McpToolError(str(exc)) from None
+        await db.commit()
+        return {
+            "ok": True,
+            "created": created,
+            "memory_id": mem.id,
+            "message": "已保存到用户长期记忆" if created else "相同内容已存在，未重复保存",
+        }
+
+
+@kb_mcp.tool(
+    name="memory_list",
+    description="列出当前用户的全部长期个人记忆（id + 内容 + 时间），最近更新的在前。",
+)
+async def _memory_list_tool(ctx: Context = None) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        memories = await list_memories(db, user.id)
+        return [
+            {"id": m.id, "content": m.content, "updated_at": m.updated_at.isoformat() if m.updated_at else None}
+            for m in memories
+        ]
+
+
+@kb_mcp.tool(
+    name="memory_search",
+    description="在当前用户的长期个人记忆中按关键词检索（记忆较多时用，避免全量列出）。",
+)
+async def _memory_search_tool(query: str, ctx: Context = None) -> list[dict]:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        memories = await search_memories(db, user.id, query)
+        return [
+            {"id": m.id, "content": m.content, "updated_at": m.updated_at.isoformat() if m.updated_at else None}
+            for m in memories
+        ]
+
+
+@kb_mcp.tool(
+    name="memory_delete",
+    description=(
+        "删除当前用户的一条长期个人记忆（按 memory_list/memory_search 返回的 id）。"
+        "记忆过期或被用户要求纠正时使用；删错可用 memory_save 重新保存正确内容。"
+    ),
+)
+async def _memory_delete_tool(memory_id: int, ctx: Context = None) -> dict:
+    async with AsyncSessionLocal() as db:
+        user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
+        removed = await delete_memory(db, user.id, memory_id)
+        await db.commit()
+        if not removed:
+            raise McpToolError(f"记忆 {memory_id} 不存在")
+        return {"ok": True, "message": "已删除"}
 
 
 def build_mcp_asgi_app():

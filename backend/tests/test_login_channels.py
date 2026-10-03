@@ -3,7 +3,6 @@
 覆盖：配置解析/脱敏/加密保持、验证码签发限流、验证码校验（过期/超次/一次性）、
 管理端 login-integrations 读写、短信登录未启用时端点 403。
 """
-import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -322,8 +321,8 @@ async def test_send_sms_xinxinyun_success(monkeypatch):
     assert req["data"]["sp_id"] == "352107"
     assert req["data"]["mobiles"] == "13800138000"
     assert req["data"]["content"] == "【测试签名】验证码123456，10 分钟内有效。"
-    # 密码发送时 MD5（文档要求）
-    assert req["data"]["password"] == hashlib.md5(b"my-api-password").hexdigest()
+    # 密码原样发送（dd67294：供应商侧「接口密码」本身就是凭证，不再二次 MD5）
+    assert req["data"]["password"] == "my-api-password"
     # 供应商文档要求带 User-Agent
     assert "User-Agent" in req["headers"]
 

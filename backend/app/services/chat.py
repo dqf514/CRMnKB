@@ -14,6 +14,7 @@ from app.models.chat_session import ChatSession
 from app.models.rag_query_log import RagQueryLog
 from app.models.user import User
 from app.services.llm import resolve_chat_llm, resolve_embed_llm
+from app.services.memory import list_memories, memory_context_block
 from app.services.skills.base import tool_spec
 from app.services.skills.registry import execute_skill, get_enabled_skills
 from app.services.permissions import accessible_ids, filter_accessible_ids
@@ -810,6 +811,7 @@ async def stream_agent_chat_events(
     from app.services.acp_bridge import bridge
 
     yield {"type": "meta", "session_id": session.id}
+    fresh_session = False
     try:
         dsh_sid = session.dsh_session_id
         if dsh_sid:
@@ -820,6 +822,7 @@ async def stream_agent_chat_events(
                 dsh_sid = None
         if not dsh_sid:
             dsh_sid = await bridge.new_session(user)
+            fresh_session = True
             # 注意：流式生成器运行时请求事务已结束，session ORM 对象已被 detach，
             # 直接改属性再 commit 不会落库，必须显式 UPDATE
             await db.execute(
@@ -834,12 +837,23 @@ async def stream_agent_chat_events(
         yield {"type": "error", "detail": "agent 会话创建失败，请稍后重试"}
         return
 
+    # 新 dsh 会话才注入个人记忆（resume 的会话 dsh 侧已有上下文，重复注入浪费 token）；
+    # 注入只作用于发给 dsh 的 prompt，落库的仍是用户原始问题
+    prompt_text = question
+    if fresh_session:
+        try:
+            block = memory_context_block(await list_memories(db, user.id, limit=30))
+            if block:
+                prompt_text = f"{block}\n\n{question}"
+        except Exception:
+            logger.warning("加载用户记忆失败，按无记忆继续", exc_info=True)
+
     parts: list[str] = []
     call_names: dict[str, str] = {}
     final_response = ""
     finish_reason: str | None = None
     try:
-        async for item in bridge.run_turn(user, dsh_sid, question):
+        async for item in bridge.run_turn(user, dsh_sid, prompt_text):
             if item["kind"] == "error":
                 yield {"type": "error", "detail": item["detail"]}
                 return

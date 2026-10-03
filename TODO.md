@@ -37,6 +37,9 @@
 - [ ] **可访问性（a11y）**：键盘导航、ARIA、对比度
 - [ ] **i18n**：多语言
 
+## AI / Agent
+- [x] ~~**个人记忆（跨工作区）**~~（已落地，见文末）
+
 ## 架构 / 工程
 - [ ] **API 版本化 + 客户端生成**：OpenAPI 客户端、路由版本化
 - [ ] **CI/CD / HTTPS**：GitHub Actions、nginx 反向代理 + 证书、多环境部署
@@ -60,3 +63,4 @@
 - 报告流式生成 + 进度可视化、超时可配
 - 工作台（原 AI+研究合并）、字号切换、品牌设置、侧边栏折叠等
 - **dsh（DeepSeek Harness）Agent 基座（阶段 1+2）**：每用户/会话级 agent 问答（/chat/ask/agent/stream），知识库经 MCP 工具（kb_search/kb_read_doc/kb_list）供 agent 自主检索；CRM 读工具（客户检索/详情）+ 写操作审批链（写跟进/发邮件草稿 → admin 审批 → 自动执行，全程审计）；dsh 会话事件持久化到 PG（自写插件，替代官方 JSONL 文件后端）；前端聊天页 Agent 模式开关 + Agent 审批中心页；详见 docs/dsh基座实施方案.md
+- **个人记忆（跨工作区）**：agent 经 MCP 工具（memory_save/list/search/delete）沉淀用户长期偏好/事实（user_memories 表，user_id 隔离、agent 写入可追溯）；新 agent 会话自动注入最近 30 条记忆；个人中心「我的记忆」页可查看/编辑/删除/清空

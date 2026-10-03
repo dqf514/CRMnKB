@@ -68,7 +68,7 @@
               <el-radio value="http">通用 HTTP 网关</el-radio>
             </el-radio-group>
             <div class="hint" style="margin-left: 0; width: 100%">
-              log 通道不真实发短信，dev 环境验证码直接返回到登录页；欣欣云按官方接口发送（密码加密存储、发送时 MD5）；其他供应商可用通用 HTTP 网关适配。
+              log 通道不真实发短信，dev 环境验证码直接返回到登录页；欣欣云按官方接口发送（密码加密存储）；其他供应商可用通用 HTTP 网关适配。
             </div>
           </el-form-item>
           <template v-if="loginCfg.sms.provider === 'xinxinyun'">
@@ -81,7 +81,7 @@
                 type="password" show-password
                 :placeholder="loginCfg.sms.xinxinyun.has_password ? `已保存（尾号 ${loginCfg.sms.xinxinyun.password_tail}），输入以更换` : '未设置'"
               />
-              <div class="hint" style="margin-left: 0; width: 100%">加密存储、脱敏回显；留空表示不修改，发送时自动 MD5</div>
+              <div class="hint" style="margin-left: 0; width: 100%">加密存储、脱敏回显；留空表示不修改</div>
             </el-form-item>
             <el-form-item label="发送接口 URL">
               <el-input v-model="loginCfg.sms.xinxinyun.url" placeholder="https://sms.shxinxinyun.com/api/send-sms-batch" />

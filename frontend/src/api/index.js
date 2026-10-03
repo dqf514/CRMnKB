@@ -85,6 +85,12 @@ export const getPreferences = () => request.get('/api/v1/auth/preferences')
 export const updatePreferences = (data) => request.put('/api/v1/auth/preferences', data)
 export const updateProfile = (data) => request.put('/api/v1/auth/profile', data)
 export const updatePassword = (data) => request.put('/api/v1/auth/password', data)
+// 个人记忆（跨工作区长期记忆，仅本人可见）
+export const getMemories = () => request.get('/api/v1/auth/memories')
+export const addMemory = (content) => request.post('/api/v1/auth/memories', { content })
+export const updateMemory = (id, content) => request.put(`/api/v1/auth/memories/${id}`, { content })
+export const deleteMemory = (id) => request.delete(`/api/v1/auth/memories/${id}`)
+export const clearMemories = () => request.delete('/api/v1/auth/memories')
 
 // ========== 客户 ==========
 export const getCustomers = (params) => request.get('/api/v1/customers', { params })

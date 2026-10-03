@@ -6,6 +6,7 @@ from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +30,13 @@ from app.services.login_channels import (
     issue_login_code,
     sms_login_enabled,
     verify_login_code,
+)
+from app.services.memory import (
+    add_memory,
+    clear_memories,
+    delete_memory,
+    list_memories,
+    update_memory,
 )
 
 logger = logging.getLogger(__name__)
@@ -317,3 +325,89 @@ async def put_preferences(
     user.preferences = body
     await db.commit()
     return user.preferences
+
+
+# ---------------------------------------------------------------------------
+# 个人记忆（跨工作区；仅本人可见，agent 也可经 MCP memory_* 工具读写）
+# ---------------------------------------------------------------------------
+
+
+class _MemoryIn(BaseModel):
+    content: str
+
+
+def _memory_out(m) -> dict:
+    return {
+        "id": m.id,
+        "content": m.content,
+        "source": m.source,
+        "chat_session_id": m.chat_session_id,
+        "created_at": m.created_at.isoformat() if m.created_at else None,
+        "updated_at": m.updated_at.isoformat() if m.updated_at else None,
+    }
+
+
+@router.get("/memories")
+async def get_memories(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """我的记忆列表（最近更新在前）。"""
+    memories = await list_memories(db, user.id)
+    return {"items": [_memory_out(m) for m in memories]}
+
+
+@router.post("/memories", status_code=201)
+async def create_memory(
+    body: _MemoryIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """手动添加一条记忆。"""
+    try:
+        mem, created = await add_memory(db, user.id, body.content, source="manual")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    await db.commit()
+    return {"item": _memory_out(mem), "created": created}
+
+
+@router.put("/memories/{memory_id}")
+async def put_memory(
+    memory_id: int,
+    body: _MemoryIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """编辑一条记忆（仅本人）。"""
+    try:
+        mem = await update_memory(db, user.id, memory_id, body.content)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if mem is None:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    await db.commit()
+    return {"item": _memory_out(mem)}
+
+
+@router.delete("/memories/{memory_id}", status_code=204)
+async def remove_memory(
+    memory_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    removed = await delete_memory(db, user.id, memory_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    await db.commit()
+
+
+@router.delete("/memories")
+async def remove_all_memories(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """清空我的全部记忆。"""
+    count = await clear_memories(db, user.id)
+    await db.commit()
+    return {"ok": True, "deleted": count}

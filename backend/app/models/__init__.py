@@ -37,3 +37,4 @@ from app.models.login_attempt import LoginAttempt  # noqa: F401
 from app.models.login_code import LoginCode  # noqa: F401
 from app.models.system_setting import SystemSetting  # noqa: F401
 from app.models.agent_approval import AgentApproval  # noqa: F401
+from app.models.user_memory import UserMemory  # noqa: F401

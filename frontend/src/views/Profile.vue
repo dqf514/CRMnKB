@@ -98,6 +98,37 @@
       </el-col>
     </el-row>
 
+    <!-- 我的记忆：agent 对话自动沉淀的长期偏好/事实，跨工作区生效，仅本人可见 -->
+    <el-card style="margin-top: 16px">
+      <template #header>
+        <div class="memory-header">
+          <span class="card-title">我的记忆</span>
+          <div>
+            <el-button size="small" type="primary" plain :icon="Plus" @click="onAddMemory">添加</el-button>
+            <el-button
+              size="small" type="danger" plain :disabled="!memories.length"
+              @click="onClearMemories"
+            >清空</el-button>
+          </div>
+        </div>
+      </template>
+      <p class="pref-tip" style="margin-top: 0">
+        AI 对话中了解到的长期偏好/背景会沉淀在这里，并在新对话中自动生效；仅本人可见。发现记错了可直接编辑或删除。
+      </p>
+      <el-empty v-if="!memories.length" description="暂无记忆，对话中告诉 AI 你的偏好即可自动积累" :image-size="60" />
+      <div v-for="m in memories" :key="m.id" class="memory-item">
+        <div class="memory-content">{{ m.content }}</div>
+        <div class="memory-meta">
+          <el-tag size="small" :type="m.source === 'agent' ? 'success' : 'info'" effect="plain">
+            {{ m.source === 'agent' ? 'AI 记录' : '手动添加' }}
+          </el-tag>
+          <span class="memory-time">{{ fmtMemoryTime(m.updated_at || m.created_at) }}</span>
+          <el-button link size="small" type="primary" @click="onEditMemory(m)">编辑</el-button>
+          <el-button link size="small" type="danger" @click="onDeleteMemory(m)">删除</el-button>
+        </div>
+      </div>
+    </el-card>
+
     <!-- 头像裁剪：正方形选区 -->
     <el-dialog v-model="cropDialog" title="裁剪头像（正方形）" width="min(90vw, 480px)" append-to-body :close-on-click-modal="false">
       <div class="crop-wrap">
@@ -114,12 +145,12 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
-import { Check, Camera } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { Check, Camera, Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import Cropper from 'cropperjs'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore, ACCENTS, FONT_SIZES } from '../stores/theme'
-import { updateProfile, updatePassword, getMe, uploadAvatar } from '../api'
+import { updateProfile, updatePassword, getMe, uploadAvatar, getMemories, addMemory, updateMemory, deleteMemory, clearMemories } from '../api'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -279,6 +310,7 @@ async function savePassword() {
 
 onMounted(async () => {
   fillProfile()
+  loadMemories()
   try {
     const me = await getMe()
     authStore.user = me
@@ -288,6 +320,71 @@ onMounted(async () => {
     /* 用本地缓存 */
   }
 })
+
+// ========== 我的记忆 ==========
+const memories = ref([])
+
+async function loadMemories() {
+  try {
+    const res = await getMemories()
+    memories.value = res?.items || []
+  } catch {
+    /* 拦截器已提示 */
+  }
+}
+
+function fmtMemoryTime(iso) {
+  if (!iso) return ''
+  const d = new Date(iso.endsWith('Z') || iso.includes('+') ? iso : iso + 'Z')
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+async function onAddMemory() {
+  const { value } = await ElMessageBox.prompt('记录一条长期偏好或背景（如「报告默认用中文」）', '添加记忆', {
+    confirmButtonText: '保存',
+    cancelButtonText: '取消',
+    inputType: 'textarea',
+    inputValidator: (v) => (v && v.trim() ? true : '内容不能为空'),
+  }).catch(() => Promise.reject(new Error('cancel')))
+  await addMemory(value.trim())
+  ElMessage.success('已保存')
+  loadMemories()
+}
+
+async function onEditMemory(m) {
+  const { value } = await ElMessageBox.prompt('编辑记忆内容', '编辑记忆', {
+    confirmButtonText: '保存',
+    cancelButtonText: '取消',
+    inputType: 'textarea',
+    inputValue: m.content,
+    inputValidator: (v) => (v && v.trim() ? true : '内容不能为空'),
+  }).catch(() => Promise.reject(new Error('cancel')))
+  await updateMemory(m.id, value.trim())
+  ElMessage.success('已更新')
+  loadMemories()
+}
+
+async function onDeleteMemory(m) {
+  await ElMessageBox.confirm(`删除这条记忆？\n「${m.content.slice(0, 50)}」`, '删除记忆', {
+    type: 'warning',
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+  }).catch(() => Promise.reject(new Error('cancel')))
+  await deleteMemory(m.id)
+  ElMessage.success('已删除')
+  loadMemories()
+}
+
+async function onClearMemories() {
+  await ElMessageBox.confirm(`确定清空全部 ${memories.value.length} 条记忆？此操作不可恢复。`, '清空记忆', {
+    type: 'warning',
+    confirmButtonText: '全部清空',
+    cancelButtonText: '取消',
+  }).catch(() => Promise.reject(new Error('cancel')))
+  const res = await clearMemories()
+  ElMessage.success(`已清空 ${res?.deleted ?? 0} 条记忆`)
+  loadMemories()
+}
 </script>
 
 <style scoped>
@@ -357,5 +454,34 @@ onMounted(async () => {
   color: var(--app-ink-2);
   font-size: 12px;
   margin: 0;
+}
+.memory-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.memory-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+}
+.memory-item:last-child {
+  border-bottom: none;
+}
+.memory-content {
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.memory-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.memory-time {
+  color: var(--app-ink-2);
+  font-size: 12px;
+  flex: 1;
 }
 </style>
