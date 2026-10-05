@@ -235,6 +235,13 @@ async def init_db() -> None:
             " ON notebooks (tenant_id, updated_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_notebook_notes_notebook_sort"
             " ON notebook_notes (notebook_id, sort)",
+            # 热查询复合索引（可观测性+性能批次，与模型 __table_args__ 对应）
+            "CREATE INDEX IF NOT EXISTS ix_chat_sessions_user_updated"
+            " ON chat_sessions (user_id, updated_at)",
+            "CREATE INDEX IF NOT EXISTS ix_reports_tenant_created"
+            " ON reports (tenant_id, created_at)",
+            "CREATE INDEX IF NOT EXISTS ix_agent_approvals_tenant_status"
+            " ON agent_approvals (tenant_id, status)",
         ):
             await conn.execute(text(index_sql))
 

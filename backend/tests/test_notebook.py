@@ -157,9 +157,13 @@ async def test_save_note_as_document_creates_processing_doc(monkeypatch, tmp_pat
 
     monkeypatch.setattr(type(settings), "upload_path", property(lambda self: tmp_path))
     fake_task = SimpleNamespace()
-    monkeypatch.setattr(
-        asyncio, "create_task", lambda coro: fake_task
-    )
+
+    def _fake_create_task(coro):
+        # 不真正调度 ingestion：主动关闭协程，避免 RuntimeWarning: coroutine was never awaited
+        coro.close()
+        return fake_task
+
+    monkeypatch.setattr(asyncio, "create_task", _fake_create_task)
 
     db = _FakeSession()
     # 预存 KB
@@ -183,7 +187,13 @@ async def test_save_note_as_document_creates_processing_doc(monkeypatch, tmp_pat
 
 async def test_save_note_as_document_wrong_kb_raises_404(monkeypatch):
     import asyncio
-    monkeypatch.setattr(asyncio, "create_task", lambda coro: None)
+
+    def _fake_create_task(coro):
+        # 不真正调度 ingestion：主动关闭协程，避免 RuntimeWarning: coroutine was never awaited
+        coro.close()
+        return None
+
+    monkeypatch.setattr(asyncio, "create_task", _fake_create_task)
     db = _FakeSession()
     note = SimpleNamespace(id=1, tenant_id=1, notebook_id=5, title="t", content="c")
     from fastapi import HTTPException

@@ -335,6 +335,8 @@ async def test_aggregate_custom_merges_sources(monkeypatch):
     monkeypatch.setattr(report_svc, "resolve_embed_llm", _resolve_embed)
     monkeypatch.setattr(report_svc, "search_chunks_vector", _vec)
     monkeypatch.setattr(report_svc, "search_chunks_keyword", _kw)
+    # rerank 会 resolve chat 模型（查真实库），本测试只验证 RRF 合并，关闭 rerank
+    monkeypatch.setattr(report_svc.settings, "RAG_RERANK", False)
     # expand_contexts 的批量查询
     db.queue_execute([SimpleNamespace(document_id=2, chunk_index=0, content="新能源销量数据")])
     # attach_file_info 的文档查询（file_id 为 NULL → 不再查文件表）

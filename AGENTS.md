@@ -47,6 +47,8 @@ cd backend
 python -m venv .venv
 source .venv/Scripts/activate
 pip install -r requirements-dev.txt   # 含运行时依赖（-r requirements.txt）+ pytest 等测试依赖
+# requirements-lock.txt 是当前 venv 的 pip freeze 快照（含开发依赖），仅供排查依赖漂移
+# 与人工核对；Dockerfile 与 CI 有意暂不切换到锁文件，安装仍走 requirements[-dev].txt
 cp .env.example .env        # 按需修改
 uvicorn app.main:app --reload --port 8100
 # Swagger: http://localhost:8100/docs
@@ -65,15 +67,16 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ```bash
 cd backend
-pytest          # 475 个用例，pytest.ini 已配 asyncio_mode = auto
+pytest          # 789 个用例，pytest.ini 已配 asyncio_mode = auto
 
 # dsh PG 会话持久化插件的契约测试（TS，vitest，24 例）
 cd ../dsh/session-persistence-pg
 npm test
 ```
 
-- 测试位于 `backend/tests/`（约 30 个测试文件），`backend/conftest.py` 保证以 backend 为根导入 `app` 包。
-- **测试不连真实数据库**：用 fake session（见 `tests/test_api_smoke.py` 的 `_FakeSession`）和 `monkeypatch` 打桩 LLM / 检索等外部依赖。新增测试应沿用此风格，不要起真实 PG。
+- 测试位于 `backend/tests/`（60+ 个测试文件），`backend/conftest.py` 保证以 backend 为根导入 `app` 包，并统一覆盖测试用 JWT 密钥（≥32 字节，消除 PyJWT InsecureKeyLengthWarning）。
+- **测试不连真实数据库**：用 fake session（见 `tests/test_api_smoke.py` 的 `_FakeSession`）和 `monkeypatch` 打桩 LLM / 检索等外部依赖。新增测试应沿用此风格，不要起真实 PG。注意 /health、/metrics、后台任务（BackgroundTasks/create_task）与"另开 AsyncSessionLocal"的埋点/钩子函数都是真实连库的漏网路径，测试里必须打桩（先例见 test_observability.py / test_skills.py / test_b2_features.py）。
+- 需要真实 SQL 语义的回归测试（ACL 权限、JSONB 持久化）用 aiosqlite 内存库（requirements-dev.txt 已收），只建所需表子集、临时替换 JSONB 等 PG 专有类型，先例见 `tests/test_permissions_acl_real.py` / `tests/test_report_params_persistence.py`；模型加列与 init_db 幂等 ALTER 的对照护栏见 `tests/test_model_migration_guard.py`。
 - 前端**没有**测试、lint、格式化配置（package.json 只有 dev/build/preview），不要假设有 `npm test`。
 - 验证后端改动：跑 `cd backend && pytest`；涉及 LLM 的服务层函数在测试里必须可打桩（通过模块级 import 后 monkeypatch，而非局部 import）。
 - CI：`.github/workflows/ci.yml`（push 到 main / pull_request 触发），三个 job——后端 pytest（Python 3.13，装 `backend/requirements-dev.txt`）、dsh PG 持久化插件契约测试（Node 22，`npm ci && npm run build && npm test`）、前端构建（Node 22，`npm ci && npm run build`）。
@@ -90,22 +93,22 @@ npm test
   - `skills/`：Agent 工具调用框架（`builtin.py` 联网搜索/网页抓取 + `api_skill.py` + `mcp_skill.py` + `mcp_pool.py` MCP 连接池 + `mcp_discovery.py` + `registry.py`）。
   - `mcp_server.py`：知识库 MCP server（FastMCP streamable-http，挂在 `/api/mcp`），供 dsh 基座消费。只读工具：`kb_search` / `kb_read_doc` / `kb_list` / `crm_list_customers`（客户全量名单+总数）/ `crm_search_customers` / `crm_get_customer` / `crm_list_followups` / `crm_list_opportunities` / `crm_list_tasks` / `crm_stats`（经营概览统计）/ `skill_list`（已启用自定义工具概要，不含 config 防泄露密钥）/ `skill_call`（通用派发：调用 skill_list 列出的任意已启用工具）/ `web_search` / `web_fetch`；审批制写工具：`crm_create_customer` / `crm_update_customer` / `crm_delete_customer` / `crm_create_opportunity` / `crm_create_task` / `crm_add_followup` / `mail_draft_create` / `skill_create_api`（AI 起草 API 工具配置——name/method/url/headers/body/parameters，批准即建 `skills` 行并启用，运行时由 `ApiSkill` 执行含 SSRF 校验；只落审批单，admin 在 Agent 审批页批准后由 `agent_approvals` 执行器落库——建/改客户走字段白名单、软删可恢复，防越权改 tenant/owner；执行失败（failed）的审批单可由 admin 经 `POST /agent-approvals/{id}/retry` 重试执行）。dsh 专用 JWT（`aud=dsh-mcp`，security.py `create_mcp_token`）鉴权；KB 工具 ACL 在工具内按 user_id 强制，CRM 工具按 tenant_id 隔离（CRM 无内容级 ACL，租户内全员可见）。个人记忆工具（免审批，严格按 user_id 隔离）：`memory_save` / `memory_list` / `memory_search` / `memory_delete`。
   - `memory.py`：个人记忆（跨工作区长期偏好/事实）。存 `user_memories` 表（user_id + content + source[agent/manual] + chat_session_id 追溯）；每用户上限 200 条 FIFO 淘汰、单条 500 字、相同内容去重；agent 新会话（session/new）时把最近 30 条注入 prompt（`<user-memory>` 块，仅注入发给 dsh 的文本，落库仍是用户原始问题；resume 会话不重复注入）；个人中心「我的记忆」页可查看/编辑/删除/清空（`GET/POST/PUT/DELETE /auth/memories`）。
-  - `acp_bridge.py`：dsh 桥接服务（**单租户单 dsh ACP 进程**，`dsh --profile acp`，PyPI 客户端 `agent-client-protocol`，asyncio 原生）；进程级 patch 在 `backend/data/dsh/patches/`（`acp-model.yml` 进程启动时按 DB 默认 chat 模型自动重写——llm-pi-ai kbcrm 路由 + acp 默认 provider/model，`base.yml` 禁用官方 jsonl 会话后端、启用 PG 持久化插件）；知识库 MCP 在每会话 `session/new`/`session/resume` 时动态挂载（headers 带该用户新签的 `aud=dsh-mcp` 令牌，不落盘）；`session/request_permission` 权限应答：只读白名单工具（kb_search/kb_read_doc/kb_list/crm_list_*/crm_search_*/crm_get_*/crm_stats/skill_list/memory_*）自动 allow，写工具/skill_call/web_search/web_fetch 及其余一律拒绝；`DSH_AGENT_ENABLED` 总开关默认关，`/chat/ask/agent/stream` 走 agent 模式（ChatSession.dsh_session_id 绑定 dsh 侧会话，init_db 幂等 ALTER 加列；resume 失败自动退回 session/new 并回写新 id）。`dsh_bridge.py` 为兼容壳，仅 re-export。
+  - `acp_bridge.py`：dsh 桥接服务（**单租户单 dsh ACP 进程**，`dsh --profile acp`，PyPI 客户端 `agent-client-protocol`，asyncio 原生）；进程级 patch 在 `backend/data/dsh/patches/`（`acp-model.yml` 进程启动时按 DB 默认 chat 模型自动重写——llm-pi-ai kbcrm 路由 + acp 默认 provider/model，`base.yml` 禁用官方 jsonl 会话后端、启用 PG 持久化插件）；知识库 MCP 在每会话 `session/new`/`session/resume` 时动态挂载（headers 带该用户新签的 `aud=dsh-mcp` 令牌，不落盘）；`session/request_permission` 权限应答：只读白名单工具（kb_search/kb_read_doc/kb_list/crm_list_*/crm_search_*/crm_get_*/crm_stats/skill_list/memory_*）自动 allow，写工具/skill_call/web_search/web_fetch 及其余一律拒绝；`DSH_AGENT_ENABLED` 总开关默认关，`/chat/ask/agent/stream` 走 agent 模式（ChatSession.dsh_session_id 绑定 dsh 侧会话，init_db 幂等 ALTER 加列；resume 失败自动退回 session/new 并回写新 id）。
   - 其余：report（支持 Agent 模式：`params.agent=true` 时经 acp_bridge 由 dsh 多步检索/撰写 Markdown，再单独排版 HTML；输出退化或 agent 运行失败自动回退固定管线）/ pdf / pptx / notebook / workflow（daily/weekly 触发时间按服务器本地时间解释）/ reminder / permissions / monitoring / backup（备份目录名/manifest 一律 UTC，Z 后缀；定时自动备份开关 system_settings `backup_auto_enabled`（默认关，管理端 `GET/PUT /admin/system/auto-backup`），开启后由告警循环每个 UTC 日备份一次）/ maintenance / audit / email / customer_io / profile / file_context / ai_tasks 等。
   - CRM 反馈改造（2026-09）：`pipeline_brief.py`（AI 阶段简报：`POST /customers/{id}/brief/refresh`，跟进创建后自动刷新，写回 `customers.ai_brief/ai_brief_at`）；`email_draft.py`（AI 邮件草稿：`POST /customers/{id}/email-draft`，只生成不发送，写作规范存 system_settings `email_guide`，管理端「系统设置 → 邮件写作规范」维护）；客户 DDQ 状态（`customers.ddq_status`：none/pending/completed，列表可按 `ddq_status` 过滤）；跟进记录带 `next_step`；`GET /tasks` 支持 `customer_id` 过滤；沙箱重置 `POST /admin/system/reset-sandbox`（仅 ENV=dev/sandbox/test，先自动备份再 TRUNCATE 业务表，保留用户/模型/系统配置）；一键系统更新 `POST /admin/system/update`（admin 限定，`UPDATE_SCRIPT` 指向服务器脚本才启用——模板 `deploy/update.sh`：git pull → 按需 pip/前端构建 → 延迟 systemctl restart；脚本路径只走配置不接受传参，执行前落审计；前端「系统设置 → 系统更新」tab 在 enabled 时才显示）；`/brand` 公开配置下发 `env`（前端沙箱横幅）；文档资料类型 `doc_metadata["category"]`（上传可带 category，`PUT /library/files/{id}/category` 可改）；类型列表动态配置 `services/doc_categories.py`（system_settings `doc_categories`，默认五项，`GET /library/categories` 读取、管理端「系统设置 → 文档资料类型」`PUT /admin/settings/doc-categories` 整体替换增删改，上传/改标签按动态配置校验，删除类型不影响存量文件——未知值展示回退原始标识；前端 `stores/docCategories.js` 全局缓存）。
 - `models/`：30+ 张表（resource_permissions / document_versions / login_attempts / brand_settings / chunk_questions / rag_query_log / workflow_run 等）。
-- `core/`：`security.py`（密码哈希、JWT）、`crypto.py`（API Key 加密）。
+- `core/`：`security.py`（密码哈希、JWT）、`crypto.py`（API Key 加密）、`observability.py`（request-id contextvars + 日志过滤器、纯 ASGI 请求指标中间件、手写 Prometheus 文本输出——不引入第三方结构化日志/metrics 库）。
 - `config.py`：pydantic-settings，读 `backend/.env`，全部配置项有默认值与中文注释；新增配置项加到这里。注意它会在 import playwright 之前设置 `PLAYWRIGHT_BROWSERS_PATH` 指向 `backend/data/ms-playwright`。
-- `main.py`：lifespan 里启动三个后台 asyncio 任务——提醒/工作流周期调度（`_reminder_loop`）、系统告警检查（`_alert_loop`）、启动恢复（重排滞留 processing 文档）；关闭时清理 MCP 连接池与 dsh ACP 进程。未捕获异常统一记 `error_logs` 表并返回 500。`/health` 含 DB ping（不可达返回 503）。
+- `main.py`：lifespan 里启动三个后台 asyncio 任务——提醒/工作流周期调度（`_reminder_loop`）、系统告警检查（`_alert_loop`）、启动恢复（重排滞留 processing 文档）；关闭时清理 MCP 连接池、dsh ACP 进程与 LLM HTTP 客户端池（`api_llm.close_http_clients`）。未捕获异常统一记 `error_logs` 表并返回 500。`/health` 含 DB ping（不可达返回 503）；`/metrics`（免鉴权，同 /health 面向内网）输出 Prometheus 文本：请求计数/延迟直方图（按方法+归一化路径标签）+ 进程 uptime + db_up。每个请求经 `ObservabilityMiddleware` 生成/透传 `X-Request-ID`（响应头回写），日志带 request_id 字段。
 
 ## dsh agent 基座（阶段 2：ACP 接入面）
 
 dsh（DeepSeek Harness）作为 Agent 运行时被 FastAPI 内嵌管理：**单租户单 dsh ACP 子进程**（`dsh --profile acp`，标准 ACP v1 stdio，stdin EOF 即退出），经 PyPI 官方客户端 `agent-client-protocol`（pin `0.12.*`，asyncio 原生）驱动；会话经 `session/new`/`session/resume` 管理，PG 持久化插件支撑跨进程恢复（后端重启不丢 agent 上下文）。方案文档见 `docs/dsh基座实施方案.md`（文末有阶段 1/阶段 2 落地记录）。
 
-- **ACP 客户端**：`agent-client-protocol`（PyPI，requirements.txt 已收）。阶段 1 的 `deepseek-harness-sdk`（vendor 副本 `backend/vendor/deepseek-harness-sdk/`）不再使用、不再安装进镜像，目录保留无害。
+- **ACP 客户端**：`agent-client-protocol`（PyPI，requirements.txt 已收）。阶段 1 的 `deepseek-harness-sdk`（stdio JSON-RPC）已随 ACP 切换整体废弃，vendor 副本与 `dsh_bridge.py` 兼容壳均已删除。
 - **dsh 运行时**：npm 包 `@deepseek-ai/dsh@0.1.7-rc.2`（锁版本，要求 Node >=22.19 或 >=24）。开发机装在 `dsh/runtime/`，Windows 下 `DSH_BIN` 必须指 `.cmd` shim（`dsh/runtime/node_modules/.bin/dsh.cmd`）；Linux/容器指无后缀 shim。
 - **PG 会话持久化插件** `@kbcrm/dsh-session-persistence-pg`：TS 源码在 `dsh/session-persistence-pg/`（`npm run build` → dist，`npm test` = vitest 契约测试 24 例），落库表 `dsh_session_headers` / `dsh_session_events`。需先 `dsh plugin --profile acp add <插件路径>` 注册进 DSH_HOME 的 **acp** profile（该命令把参数原样转发 pnpm，**pnpm 必须在 PATH**；sdk profile 的旧注册态仅阶段 1 遗留，不再使用）；`backend/data/dsh/patches/base.yml` 负责禁用官方 jsonl 后端、启用 PG 后端（`databaseUrl` 用 `!!js process.env.DSH_PG_URL ?? <默认>`）。
-- **`dsh/` 目录**（勿删）：`runtime/` dsh 运行时 npm 安装、`home/` DSH_HOME（sdk/acp profile、插件注册态）、`session-persistence-pg/` PG 插件源码、`patches/` patch 素材（含 ACP 冒烟生成的 `acp-model.yml`）、`docker-compose.dev.yml` 开发库 5433 端口 override、`smoke_pg.py` PG 持久化冒烟脚本、`acp_smoke.py` ACP 端到端冒烟脚本、`venv/` 插件开发用 Python 环境。
+- **`dsh/` 目录**（勿删）：`runtime/` dsh 运行时 npm 安装、`home/` DSH_HOME（sdk/acp profile、插件注册态）、`session-persistence-pg/` PG 插件源码、`patches/` patch 素材（含 ACP 冒烟生成的 `acp-model.yml`）、`docker-compose.dev.yml` 开发库 5433 端口 override、`acp_smoke.py` ACP 端到端冒烟脚本、`venv/` 插件开发用 Python 环境。
 - **对外端点**：`POST /api/v1/chat/ask/agent/stream`（SSE agent 问答）；`/api/mcp`（FastMCP streamable-http，Bearer 用户令牌 `aud=dsh-mcp`，KB 检索 + CRM 读写工具，KB 工具 ACL 在工具内按 user_id 强制、CRM 按 tenant_id 隔离，写工具走审批制）。
 
 **DSH_\* 配置表**（`backend/app/config.py`，`backend/.env.example` 有注释）：
@@ -117,7 +120,6 @@ dsh（DeepSeek Harness）作为 Agent 运行时被 FastAPI 内嵌管理：**单�
 | `DSH_HOME` | `data/dsh/home` | dsh 运行时 home（profile/凭据/插件注册态） |
 | `DSH_PATCHES_DIR` | `data/dsh/patches` | 进程级 patch yml 目录（base.yml 静态 PG patch + acp-model.yml 自动生成） |
 | `DSH_WORKSPACE_ROOT` | `data/dsh/workspace` | agent 会话工作目录（所有会话共用同一 cwd：session/resume 要求 cwd 一致） |
-| `DSH_PROVIDER` | `deepseek-official` | **ACP 阶段已弃用**（保留仅为兼容旧 .env）；模型路由固定为进程级 patch 的 llm-pi-ai kbcrm 路由 |
 | `DSH_MCP_URL` | `http://127.0.0.1:8100/api/mcp` | 注入 dsh 的知识库 MCP server 地址 |
 | `DSH_MCP_TOKEN_EXPIRE_MINUTES` | `10080`（7 天） | dsh 专用 MCP 令牌有效期；每次会话激活（session/new|resume）时新签，过期自动换发无需重建进程 |
 

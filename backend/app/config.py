@@ -160,8 +160,6 @@ class Settings(BaseSettings):
     DSH_PATCHES_DIR: str = "data/dsh/patches"
     # agent 会话工作目录（所有会话共用同一 cwd：session/resume 要求 cwd 与创建时一致）
     DSH_WORKSPACE_ROOT: str = "data/dsh/workspace"
-    # （ACP 切换后不再使用：模型路由固定为进程级 patch 里的 llm-pi-ai kbcrm 路由）
-    DSH_PROVIDER: str = "deepseek-official"
     # 注入 dsh 的知识库 MCP server 地址（streamable-http，每会话 session/new|resume 挂载）
     DSH_MCP_URL: str = "http://127.0.0.1:8100/api/mcp"
     # dsh 专用 MCP 令牌有效期（分钟）：每次会话激活（session/new|resume）时新签，

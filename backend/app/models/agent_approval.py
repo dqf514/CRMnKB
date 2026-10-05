@@ -5,7 +5,7 @@
 """
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Text, func
+from sqlalchemy import ForeignKey, Index, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -14,6 +14,10 @@ from app.models.base import Base
 
 class AgentApproval(Base):
     __tablename__ = "agent_approvals"
+    __table_args__ = (
+        # 热查询复合索引：审批列表按租户 + 状态过滤
+        Index("ix_agent_approvals_tenant_status", "tenant_id", "status"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     tenant_id: Mapped[int] = mapped_column(ForeignKey("tenants.id"))

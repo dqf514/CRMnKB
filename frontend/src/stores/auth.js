@@ -1,10 +1,20 @@
 import { defineStore } from 'pinia'
 import { login as apiLogin, phoneLogin as apiPhoneLogin, getMe } from '../api'
 
+// localStorage 里的 user 可能损坏（手工改过/旧版本格式），JSON.parse 抛错会导致 store 创建失败白屏
+function loadLocalUser() {
+  try {
+    return JSON.parse(localStorage.getItem('user') || 'null')
+  } catch {
+    localStorage.removeItem('user')
+    return null
+  }
+}
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: localStorage.getItem('token') || '',
-    user: JSON.parse(localStorage.getItem('user') || 'null'),
+    user: loadLocalUser(),
   }),
   actions: {
     _applyAuth(res) {

@@ -42,8 +42,7 @@ COPY requirements.txt .
 RUN pip install -r requirements.txt
 
 # ACP 客户端 agent-client-protocol 已随 requirements.txt 安装（dsh 基座阶段 2 起
-# 桥接层改用标准 ACP，`dsh --profile acp`）。vendor/deepseek-harness-sdk/ 目录
-# 保留无害（阶段 1 的 SDK 副本），但不再安装进镜像。
+# 桥接层改用标准 ACP，`dsh --profile acp`）。
 
 # Playwright 无头 Chromium（--with-deps 自动装系统依赖）+ 中文字体（PDF 渲染中文必需）。
 # 浏览器安装路径显式固定为 /app/data/ms-playwright：app/config.py 运行时会

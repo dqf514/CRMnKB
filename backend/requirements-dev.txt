@@ -4,3 +4,5 @@
 
 pytest==8.*
 pytest-asyncio==0.26.*
+# ACL/JSONB 持久化回归测试用 sqlite 内存库跑真实 SQL（不连真实 PG）
+aiosqlite==0.22.*

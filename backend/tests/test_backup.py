@@ -1,8 +1,11 @@
-"""备份服务测试：UTC 时间戳口径 + 定时自动备份开关/按日去重。
+"""备份服务测试：UTC 时间戳口径 + 定时自动备份开关/按日去重 + tar 恢复路径。
 
 风格与全项目一致：monkeypatch 打桩 subprocess/DB，不起真实 PG、不跑 pg_dump。
 """
+import gzip
+import io
 import json
+import tarfile
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -94,3 +97,75 @@ async def test_maybe_auto_backup_enabled_runs_once_per_utc_day(backup_env, monke
     (d / "manifest.json").write_text("{}", encoding="utf-8")
     assert await backup_svc.maybe_auto_backup() is None
     assert calls == ["run"]  # 未再次执行
+
+
+# ---------- restore_backup：tar 解档 / 恢复路径 ----------
+
+
+def _make_backup_dir(bp, name="20260101_000000Z"):
+    """造一个最小可恢复的备份目录（manifest + db.sql.gz）。"""
+    d = bp / name
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text("{}", encoding="utf-8")
+    with gzip.open(d / "db.sql.gz", "wb") as f:
+        f.write(b"-- fake sql")
+    return d
+
+
+def _write_tar(path, members: dict):
+    with tarfile.open(path, "w:gz") as tar:
+        for arcname, data in members.items():
+            info = tarfile.TarInfo(arcname)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+
+async def test_restore_backup_happy_path(backup_env, monkeypatch, tmp_path):
+    """恢复：清掉现有上传目录 → 解档回 data/ 下 → 灌 SQL（_run 打桩）。"""
+    d = _make_backup_dir(backup_env)
+    _write_tar(d / "uploads.tar.gz", {"uploads/a.txt": b"hi", "brand/logo.png": b"lg"})
+
+    uploads = tmp_path / "uploads"
+    (uploads / "stale.txt").write_text("旧文件", encoding="utf-8")
+
+    ran = []
+
+    async def _fake_run(cmd, input=None, env=None):
+        ran.append((cmd, input))
+        return b""
+
+    monkeypatch.setattr(backup_svc, "_run", _fake_run)
+    await backup_svc.restore_backup(d.name)
+
+    # 旧文件被清、归档内容还原
+    assert not (uploads / "stale.txt").exists()
+    assert (uploads / "a.txt").read_bytes() == b"hi"
+    assert (tmp_path / "brand" / "logo.png").read_bytes() == b"lg"
+    # SQL 经 psql 灌入
+    assert len(ran) == 1
+    assert "psql" in ran[0][0]
+    assert ran[0][1] == b"-- fake sql"
+
+
+async def test_restore_backup_missing_raises(backup_env):
+    with pytest.raises(RuntimeError, match="备份不存在"):
+        await backup_svc.restore_backup("20990101_000000Z")
+
+
+async def test_restore_backup_rejects_path_traversal(backup_env, monkeypatch, tmp_path):
+    """恶意 tar（../ 路径穿越）必须被拒绝：filter="data" 抛 TarError，落盘文件不存在。"""
+    d = _make_backup_dir(backup_env)
+    probe = "evil_kbcrm_probe.txt"
+    _write_tar(d / "uploads.tar.gz", {f"../{probe}": b"pwned"})
+
+    async def _must_not_run(*args, **kwargs):
+        raise AssertionError("tar 解档失败时不应执行 psql 恢复")
+
+    monkeypatch.setattr(backup_svc, "_run", _must_not_run)
+    escaped = tmp_path.parent / probe  # 穿越目标在解档根目录之外
+    try:
+        with pytest.raises(tarfile.TarError):
+            await backup_svc.restore_backup(d.name)
+        assert not escaped.exists()
+    finally:
+        escaped.unlink(missing_ok=True)  # 万一防护失效也不留残文件

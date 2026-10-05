@@ -30,5 +30,5 @@ rapidocr_onnxruntime
 # 可选：Tesseract OCR 兜底（需系统 apt install tesseract-ocr tesseract-ocr-chi-sim）
 pytesseract
 # dsh agent 基座（阶段 2 ACP 切换）：ACP v1 官方 Python 客户端，替代阶段 1 的
-# deepseek-harness-sdk（stdio JSON-RPC，vendor 目录保留但不再安装，见 Dockerfile 注释）
+# deepseek-harness-sdk（stdio JSON-RPC，vendor 副本已删除）
 agent-client-protocol==0.12.*

@@ -23,9 +23,6 @@ data/
 .env
 .env.*
 
-# 阶段 1 遗留的 vendor SDK（不再安装进镜像，见 Dockerfile 注释）
-vendor/deepseek-harness-sdk/
-
 # 镜像构建自描述文件
 Dockerfile
 .dockerignore

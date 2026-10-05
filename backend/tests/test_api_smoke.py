@@ -95,11 +95,12 @@ async def test_me_without_token_401(client):
 
 
 async def test_rag_query_fallback_when_no_data(client, monkeypatch):
-    # 免鉴权：替换 get_current_user
+    # 免鉴权：替换 get_current_user；db 也用假会话（端点会落 RagQueryLog，勿触真实库）
     async def _fake_user():
         return SimpleNamespace(id=1, tenant_id=1, username="admin", name="管理员", role="admin")
 
     app.dependency_overrides[deps.get_current_user] = _fake_user
+    _override_db()
 
     # mock 服务层：知识库无数据时返回兜底
     async def _fake_rag_query(db, tenant_id, question, top_k=None, kb_ids=None, user=None):

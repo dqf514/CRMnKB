@@ -3,9 +3,9 @@
 > 2026-10 整合版：本轮自有体检 + `claude-Check-Report.md` 两份报告交叉验证后合并去重。
 > 按执行批次排列（批内按投入产出比），每条带文件:行号。做完即删条目。
 >
-> **进度：第一批（数据安全 10 项）、第二批（静默失效 14 项）、第三批（出站边界与依赖 5 项）、第四批（健壮性/并发/UI 一致性）已全部完成**，全量 733 pytest 通过、前端 build 通过。
+> **进度：五批体检修复全部完成**（第一批数据安全 10 项、第二批静默失效 14 项、第三批出站边界与依赖 5 项、第四批健壮性/并发/UI 一致性、第五批测试与工程护栏）。全量 788 pytest 通过 / 0 警告，前端 lint 0 error + vitest 41 例 + build 通过。
 
-## 第四批遗留尾巴（下轮顺手做）
+## 遗留尾巴（下轮顺手做）
 
 - [ ] 启动恢复无逐文档兜底，DB 抖动恢复 task 静默死亡（`main.py` `_recover_loop`/`ingestion.py` requeue 路径）：逐文档 try/except + 记 error_logs
 - [ ] 422 字段级映射（`utils/applyFieldErrors.js`）目前只接了客户/任务表单，待接：Knowledge、admin/Users、admin/Groups、admin/LlmModels、admin/McpServers、admin/Skills、Profile、CustomerDetail 的跟进/商机/任务弹窗
@@ -16,19 +16,10 @@
 - [ ] `emit()` 修复后 else 分支 `cur_len = blk_len` 仍少计种子长度（存量次要计数偏差，`ingestion.py` `_build_chunks`）
 - [ ] 从旧版（root 容器）Docker 部署首次升级后需一次性 `compose run --rm --user root backend chown -R app:app /app/data`（已写进部署指南，此处备忘）
 
-## 第五批 — 测试与工程护栏（中期）
+## 第五批 — 测试与工程护栏（已完成）
 
-- [ ] **ACL 真实实现测试**：`accessible_ids`/`filter_accessible_ids` 当前全程被 monkeypatch，RAG 安全边界零回归保护（sqlite 内存库或 testcontainers）
-- [ ] **模型字段↔迁移块对照测试**：启动期 schema 校验，杜绝 🟠-17 类遗漏
-- [ ] **JSONB 持久化断言**：报告生成后断言 DB params 含 presentation_html（防 🔴-6 类回归）
-- [ ] **前端 ESLint + Vitest 起步**：覆盖 stores/api 纯逻辑（chatStream 帧解析、uploads、theme）
-- [ ] 零测试服务补测：dashboard/monitoring/maintenance/library_sync/backup（tar 解档无测试尤其危险）
-- [ ] 清理测试警告：notebook.py:250 协程未 await、测试 JWT 密钥 20 字节
-- [ ] 结构化日志 + request-id + /metrics（Prometheus）；降级路径同步记 error_logs
-- [ ] Python 锁文件；nginx 安全头（X-Frame-Options/CSP/nosniff）；package-lock registry 统一
-- [ ] 热查询复合索引：chat_sessions(user_id,updated_at)、reports(tenant_id,created_at)、agent_approvals(tenant_id,status)
-- [ ] 仓库卫生：`backend/data/dsh/patches/acp-model.yml` 运行产物被跟踪（跑一次就 dirty）移出 git；清理 vendor SDK 死代码/dsh_bridge 空壳/DSH_PROVIDER
-- [ ] api_llm.py httpx.AsyncClient 每次新建无池化
+> 已全部落地：ACL 真实实现测试（`test_permissions_acl_real.py`，aiosqlite 内存库 14 例）、模型字段↔迁移块对照（`test_model_migration_guard.py`）、JSONB 持久化回归（`test_report_params_persistence.py`）、测试警告 48→0（另清 7 处测试期真实连 PG 的漏网路径）、前端 ESLint flat config（0 error）+ Vitest 41 例（chatStream 帧解析/各 utils/stores）、零测试服务补测（monitoring/maintenance/library_sync/backup/dashboard +25 例，tar 穿越防护确认）、结构化日志 request-id + /metrics（Prometheus 文本）、热查询复合索引 ×3、api_llm httpx 按事件循环池化、运行产物 acp-model.yml 移出 git、vendor SDK/dsh_bridge 壳/DSH_PROVIDER 死代码清理、nginx 安全头三枚（CSP 待定）、Python 锁文件 requirements-lock.txt（产出未切换）。
+> 遗留：package-lock registry 混杂（285 npmmirror + 12 npmjs.org 的 @cropper/* + 1 条 cdn.sheetjs.com 预期例外，未批量改）；降级路径同步记 error_logs 未做。
 
 ## P2 — 低优改进
 
@@ -37,7 +28,7 @@
 - [ ] 笔记本存文档 KB 只按 tenant 校验且文件 owner_id=NULL 成孤儿（`notebook.py:205-228`）
 - [ ] 客户下拉 page_size:200 上限 → 远程搜索下拉（ReportsPanel/Tasks/CustomerDetail 多处）
 - [ ] blob 响应拦截器取不到 detail；SSE 401 跳登录无提示（`api/index.js:31`、`chatStream.js:24`）
-- [ ] authStore 初始化 JSON.parse 无容错白屏（`stores/auth.js:7`）；admin 守卫仅读 localStorage（纵深问题，后端有鉴权）
+- [ ] ~~authStore 初始化 JSON.parse 无容错白屏~~（已修，`stores/auth.js` loadLocalUser 容错+清除坏数据）；admin 守卫仅读 localStorage（纵深问题，后端有鉴权）
 - [ ] 视觉复核/PST 轮询卸载清理不彻底（`KbDetail.vue:422`、`stores/uploads.js:131`）；chatStream generator 无 finally reader.cancel()
 - [ ] 备份 RETENTION=10 硬编码（`backup.py:18`）；`crm_search_customers` LIKE 未转义通配符（`mcp_server.py:360`）
 - [ ] 全局搜索「报告」跳转不带 `?report=id`（`GlobalSearch.vue:64`）

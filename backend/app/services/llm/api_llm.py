@@ -1,9 +1,44 @@
+import asyncio
 import json
 
 import httpx
 
 from app.config import settings
 from app.services.llm.base import LLMService
+
+# httpx 客户端池化：按事件循环复用一个 AsyncClient（参照 mcp_pool 的进程内单例模式）。
+# 键为事件循环——pytest 每个用例独立 loop、asyncio.run 每次新建 loop，
+# 跨 loop 复用同一 client 会触发 anyio "attached to a different loop"，故按 loop 分桶。
+# 客户端不设 base_url（各方法用绝对 URL，一个池可服务任意模型端点），
+# 超时一律逐请求传入，client 级 timeout 仅兜底。
+_clients: dict[asyncio.AbstractEventLoop, httpx.AsyncClient] = {}
+
+
+def _get_client() -> httpx.AsyncClient:
+    """取当前事件循环的共享 AsyncClient（懒创建）。
+
+    构造时引用 httpx.AsyncClient 而非局部 import 的类，
+    保证测试里 monkeypatch httpx.AsyncClient（MockTransport）仍然生效。
+    """
+    loop = asyncio.get_running_loop()
+    client = _clients.get(loop)
+    if client is None or client.is_closed:
+        client = httpx.AsyncClient(
+            timeout=300,
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        )
+        _clients[loop] = client
+    return client
+
+
+async def close_http_clients() -> None:
+    """关闭全部池化 AsyncClient（应用 lifespan 关闭时调用）。"""
+    for loop, client in list(_clients.items()):
+        _clients.pop(loop, None)
+        try:
+            await client.aclose()
+        except Exception:  # 跨 loop 关闭可能报错，忽略
+            pass
 
 
 class ApiLLM(LLMService):
@@ -42,27 +77,29 @@ class ApiLLM(LLMService):
     async def chat(self, messages: list[dict], *, timeout: int | None = None, **kw) -> str:
         self._check_key()
         payload = {"model": self.chat_model, "messages": messages, **kw}
-        async with httpx.AsyncClient(timeout=timeout or self.chat_timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        resp = await client.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload,
+            timeout=timeout or self.chat_timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
         self.last_usage = self._usage(data)
         return data["choices"][0]["message"]["content"]
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         self._check_key()
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{self.base_url}/embeddings",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json={"model": self.embed_model, "input": texts},
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        resp = await client.post(
+            f"{self.base_url}/embeddings",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json={"model": self.embed_model, "input": texts},
+            timeout=60,
+        )
+        resp.raise_for_status()
+        data = resp.json()
         self.last_usage = self._usage(data)
         items = sorted(data["data"], key=lambda x: x["index"])
         return [item["embedding"] for item in items]
@@ -86,14 +123,15 @@ class ApiLLM(LLMService):
             ],
             **kw,
         }
-        async with httpx.AsyncClient(timeout=timeout or self.chat_timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        resp = await client.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload,
+            timeout=timeout or self.chat_timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
         self.last_usage = self._usage(data)
         message = data["choices"][0]["message"]
         tool_calls = []
@@ -138,43 +176,46 @@ class ApiLLM(LLMService):
         }
         content_parts: list[str] = []
         tool_calls_by_index: dict[int, dict] = {}
-        async with httpx.AsyncClient(timeout=timeout or self.chat_timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {}) or {}
-                    content = delta.get("content")
-                    if content:
-                        content_parts.append(content)
-                        if on_token is not None:
-                            await on_token(content)
-                    for tc in delta.get("tool_calls") or []:
-                        idx = tc.get("index", 0)
-                        entry = tool_calls_by_index.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                        if tc.get("id"):
-                            entry["id"] = tc["id"]
-                        fn = tc.get("function") or {}
-                        if fn.get("name"):
-                            entry["name"] = fn["name"]
-                        if fn.get("arguments"):
-                            entry["arguments"] += fn["arguments"]
+        client = _get_client()
+        # 流式响应在 async with client.stream 内完整消费后才释放；
+        # client 是池化共享的，这里只管理本次响应的生命周期，不能关 client
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload,
+            timeout=timeout or self.chat_timeout,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {}) or {}
+                content = delta.get("content")
+                if content:
+                    content_parts.append(content)
+                    if on_token is not None:
+                        await on_token(content)
+                for tc in delta.get("tool_calls") or []:
+                    idx = tc.get("index", 0)
+                    entry = tool_calls_by_index.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if tc.get("id"):
+                        entry["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        entry["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        entry["arguments"] += fn["arguments"]
         self.last_usage = None  # 流式响应通常无 usage
         tool_calls = []
         for idx in sorted(tool_calls_by_index):
@@ -194,16 +235,17 @@ class ApiLLM(LLMService):
         # 用户可能直接粘贴完整端点（…/rerank），避免拼成 /rerank/rerank
         url = self.base_url if self.base_url.endswith("/rerank") else f"{self.base_url}/rerank"
         payload = {"model": self.chat_model, "query": query, "documents": documents}
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                url,
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            )
-            if resp.status_code >= 400:
-                # 透出响应体便于诊断（模型名错误、余额不足、端点路径不对等）
-                raise RuntimeError(f"rerank 接口 HTTP {resp.status_code}: {resp.text[:300]}")
-            data = resp.json()
+        client = _get_client()
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload,
+            timeout=60,
+        )
+        if resp.status_code >= 400:
+            # 透出响应体便于诊断（模型名错误、余额不足、端点路径不对等）
+            raise RuntimeError(f"rerank 接口 HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
         self.last_usage = None  # rerank 接口通常无 token 计数
         return self._parse_rerank_scores(data, len(documents))
 
@@ -237,16 +279,17 @@ class ApiLLM(LLMService):
     async def transcribe(self, file_path: str) -> str:
         """OpenAI/whisper 兼容语音转写（multipart，超时放宽到 300s 适配大音频）。"""
         self._check_key()
-        async with httpx.AsyncClient(timeout=300) as client:
-            with open(file_path, "rb") as f:
-                resp = await client.post(
-                    f"{self.base_url}/audio/transcriptions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    files={"file": f},
-                    data={"model": self.chat_model},
-                )
-            resp.raise_for_status()
-            data = resp.json()
+        client = _get_client()
+        with open(file_path, "rb") as f:
+            resp = await client.post(
+                f"{self.base_url}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                files={"file": f},
+                data={"model": self.chat_model},
+                timeout=300,
+            )
+        resp.raise_for_status()
+        data = resp.json()
         self.last_usage = None  # 转写接口通常无 token 计数
         return data.get("text", "")
 
@@ -255,29 +298,32 @@ class ApiLLM(LLMService):
         self._check_key()
         self.last_usage = None
         payload = {"model": self.chat_model, "messages": messages, "stream": True, **kw}
-        async with httpx.AsyncClient(timeout=timeout or self.chat_timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    # 部分流式 chunk 的 choices 为空数组（如结尾/仅用量帧），跳过避免 IndexError
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-                    content = delta.get("content")
-                    if content:
-                        yield content
+        client = _get_client()
+        # 流式生成器：响应在 async with client.stream 内逐行消费，退出时才释放；
+        # client 是池化共享的，只管理本次响应的生命周期，不能关 client
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload,
+            timeout=timeout or self.chat_timeout,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if not data or data == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                # 部分流式 chunk 的 choices 为空数组（如结尾/仅用量帧），跳过避免 IndexError
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                content = delta.get("content")
+                if content:
+                    yield content

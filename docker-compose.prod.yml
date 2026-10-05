@@ -37,7 +37,7 @@ services:
       PG_DOCKER_CONTAINER: ""
       # dsh agent 基座（阶段 2 ACP）：镜像内置 Node + @deepseek-ai/dsh + PG 持久化插件。
       # 单租户单 ACP 进程；模型路由由进程级 patch（acp-model.yml）按 DB 默认 chat
-      # 模型自动生成（llm-pi-ai kbcrm 路由），DSH_PROVIDER 已弃用无需配置。
+      # 模型自动生成（llm-pi-ai kbcrm 路由）。
       DSH_AGENT_ENABLED: "true"
       DSH_BIN: /opt/dsh-runtime/node_modules/.bin/dsh
       # dsh 会话持久化插件的 PG 连接串（patch yml 里 !!js 读进程环境变量）

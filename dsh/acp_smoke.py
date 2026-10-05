@@ -36,7 +36,7 @@ from app.config import settings  # noqa: E402
 from app.core.security import create_mcp_token  # noqa: E402
 from app.database import AsyncSessionLocal  # noqa: E402
 from app.models.user import User  # noqa: E402
-from app.services.dsh_bridge import DshBridge  # noqa: E402
+from app.services.acp_bridge import AcpBridge  # noqa: E402
 
 DSH_BIN = r"D:\AI\CRMnKB\dsh\runtime\node_modules\.bin\dsh.cmd"
 DSH_HOME = r"D:\AI\CRMnKB\dsh\home"
@@ -126,7 +126,7 @@ async def run_round(label: str, patches: list[str], env: dict[str, str], token: 
 
 async def main() -> None:
     # 1. 模型配置：DB 默认 chat 模型（复用桥接层解析逻辑）
-    model_name, base_url, api_key = await DshBridge()._resolve_chat_model(tenant_id=1)
+    model_name, base_url, api_key = await AcpBridge()._resolve_chat_model(tenant_id=1)
     print(f"模型: {model_name} @ {base_url}")
 
     # 2. admin 的 dsh-mcp 令牌

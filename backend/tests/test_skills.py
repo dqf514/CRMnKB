@@ -21,6 +21,17 @@ from app.services.skills.api_skill import ApiSkill, render_template
 from app.services.skills.builtin import WebFetchSkill, WebSearchSkill
 
 
+@pytest.fixture(autouse=True)
+def _stub_skill_call_log(monkeypatch):
+    """skill 调用埋点（record_skill_call_log）会另开真实会话写库——本文件一律打桩，
+    不触真实库（埋点自身行为由 test_skill_instrumentation.py 覆盖）。"""
+
+    async def _noop(entry):
+        return None
+
+    monkeypatch.setattr("app.services.skills.registry.record_skill_call_log", _noop)
+
+
 class _FakeResult:
     def __init__(self, value=None):
         self._value = value

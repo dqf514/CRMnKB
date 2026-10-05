@@ -13,10 +13,12 @@ backend/data/uploads/
 # Playwright 浏览器二进制
 backend/data/ms-playwright/
 
-# dsh 运行时状态（user_*.yml 含 MCP 令牌，切勿入库；base.yml 为静态配置需保留跟踪）
+# dsh 运行时状态（user_*.yml 含 MCP 令牌，切勿入库；base.yml 为静态配置需保留跟踪；
+# acp-model.yml 是运行产物——后端启动时按 DB 默认 chat 模型自动重写，不入库）
 backend/data/dsh/home/
 backend/data/dsh/workspace/
 backend/data/dsh/patches/user_*.yml
+backend/data/dsh/patches/acp-model.yml
 
 # Node
 frontend/node_modules/

@@ -203,7 +203,12 @@ async def test_restore_active_resource_400(client):
     assert resp.status_code == 400
 
 
-async def test_purge_customer_physical(client, tmp_path):
+async def test_purge_customer_physical(client, tmp_path, monkeypatch):
+    # 后台 VACUUM 走 asyncpg 直连，测试环境打桩掉（不触真实库）
+    async def _noop_vacuum():
+        return None
+
+    monkeypatch.setattr("app.api.recycle_bin.run_vacuum", _noop_vacuum)
     db = _FakeSession()
     _override(db)
     customer = _customer_ns(deleted_at=datetime(2026, 8, 13))

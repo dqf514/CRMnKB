@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.routing import Route
 
@@ -45,6 +45,11 @@ from app.api import (
 from sqlalchemy import text
 
 from app.config import settings
+from app.core.observability import (
+    ObservabilityMiddleware,
+    install_request_id_logging,
+    render_metrics,
+)
 from app.database import AsyncSessionLocal, init_db
 from app.services import mcp_server as kb_mcp_server
 from app.services.error_log import log_error
@@ -52,7 +57,7 @@ from app.services.monitoring import check_alerts
 from app.services.reminder import run_all_rules
 from app.services.workflow import run_due_workflows
 
-logging.basicConfig(level=logging.INFO)
+install_request_id_logging()  # 人类可读日志格式 + request_id 字段（contextvars 注入）
 logger = logging.getLogger(__name__)
 
 
@@ -174,6 +179,12 @@ async def lifespan(app: FastAPI):
         await bridge.close_all()
     except Exception as exc:
         logger.warning("dsh 进程关闭失败（忽略）: %s", exc)
+    # LLM HTTP 客户端池：关闭复用的 httpx AsyncClient（api_llm 模块级池）
+    try:
+        from app.services.llm.api_llm import close_http_clients
+        await close_http_clients()
+    except Exception as exc:
+        logger.warning("LLM HTTP 客户端池关闭失败（忽略）: %s", exc)
 
 
 app = FastAPI(title="知识库系统 API", version="0.2.0", lifespan=lifespan)
@@ -205,6 +216,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# 可观测性：request-id 透传/生成与回写 + 请求计数/延迟直方图采集。
+# 后添加的中间件在更外层，故放在 CORS 之后注册（对 CORS 预检响应也回写 request-id）。
+app.add_middleware(ObservabilityMiddleware)
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(agent_approvals.router, prefix="/api/v1")
@@ -267,6 +281,24 @@ async def health():
         logger.warning("健康检查 DB ping 失败: %s", exc)
         return JSONResponse(status_code=503, content={"status": "db_unavailable"})
     return {"status": "ok"}
+
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    """Prometheus 文本格式指标（手写最小实现，无第三方依赖）。
+
+    与 /health 一样不做鉴权（面向内网 Prometheus 抓取）；
+    db_up 为抓取时实时 SELECT 1 的连通性结果（不可达仍返回 200，db_up=0）。"""
+    db_up = True
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception as exc:
+        logger.warning("metrics DB ping 失败: %s", exc)
+        db_up = False
+    return PlainTextResponse(
+        render_metrics(db_up), media_type="text/plain; version=0.0.4"
+    )
 
 
 # ---------------------------------------------------------------------------
