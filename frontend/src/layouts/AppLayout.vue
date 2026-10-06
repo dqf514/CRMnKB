@@ -162,6 +162,8 @@
           </el-popover>
         </div>
       </div>
+      <!-- 版本号（/brand 下发；收起态隐藏） -->
+      <div v-show="!sideCollapsed && brandStore.version" class="side-version">v{{ brandStore.version }}</div>
     </el-aside>
 
     <el-container>
@@ -881,6 +883,14 @@ onUnmounted(() => {
   gap: 8px;
   padding: 10px 16px;
   border-top: 1px solid var(--app-line);
+}
+/* 侧栏底部版本号 */
+.side-version {
+  flex: none;
+  padding: 4px 16px 8px;
+  font-size: 11px;
+  color: var(--app-ink-3, var(--el-text-color-secondary));
+  user-select: none;
 }
 .user-info {
   display: flex;

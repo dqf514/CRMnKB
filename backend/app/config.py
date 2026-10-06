@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     # sandbox 不在弱 JWT 白名单内，与 prod 一样强制强密钥）
     ENV: str = "dev"
 
+    # 应用版本号（SemVer，随发布递增；经 /brand 公开接口下发给前端展示）
+    APP_VERSION: str = "1.0.0"
+
     # 数据库
     DATABASE_URL: str = "postgresql+asyncpg://crm:crm123@localhost:5432/crmnkb"
 

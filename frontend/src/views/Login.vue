@@ -79,6 +79,8 @@
             </el-form-item>
           </el-form>
         </el-card>
+        <!-- 版本号（/brand 公开接口下发） -->
+        <div v-if="brandStore.version" class="login-version">v{{ brandStore.version }}</div>
       </div>
     </div>
   </div>
@@ -339,6 +341,15 @@ brandStore.load()  // 登录页展示自定义品牌（名称/logo）
 .code-btn {
   flex: none;
   width: 112px;
+}
+
+/* 登录卡片下方版本号 */
+.login-version {
+  margin-top: 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  user-select: none;
 }
 
 @media (max-width: 860px) {

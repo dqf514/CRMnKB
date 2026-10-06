@@ -59,6 +59,8 @@ async def _brand_dict(db: AsyncSession) -> dict:
         "sms_login_enabled": await sms_login_enabled(db),
         # 当前运行环境（dev/sandbox/prod），前端据此显示环境标识
         "env": settings.ENV,
+        # 应用版本号（SemVer），前端侧栏/登录页展示
+        "version": settings.APP_VERSION,
     }
 
 
