@@ -304,13 +304,31 @@ async def _run_update_script(script: str) -> tuple[int, str]:
     return proc.returncode, text_out[-_UPDATE_OUTPUT_TAIL:]
 
 
+async def _git_history(n: int = 15) -> list[dict]:
+    """近期提交历史（更新历程）：[{commit, date, subject}]，失败返回空列表。"""
+    code, out = await _git(
+        "log", f"-{n}", "--format=%h|%ad|%s", "--date=format:%Y-%m-%d %H:%M",
+        timeout=15,
+    )
+    if code != 0 or not out:
+        return []
+    history = []
+    for line in out.splitlines():
+        parts = line.split("|", 2)
+        if len(parts) == 3:
+            history.append({"commit": parts[0], "date": parts[1], "subject": parts[2]})
+    return history
+
+
 @router.get("/system/update-info")
 async def update_info(admin: User = Depends(require_admin)):
-    """更新功能状态：是否已配置脚本 + 当前版本（commit 短哈希）。"""
+    """更新功能状态：是否已配置脚本 + 当前版本（版本号 + commit）+ 近期更新历程。"""
     script = settings.UPDATE_SCRIPT
     return {
         "enabled": bool(script),
+        "version": settings.APP_VERSION,
         "commit": await _git_short_head() if script else None,
+        "history": await _git_history() if script else [],
     }
 
 
@@ -318,8 +336,8 @@ async def update_info(admin: User = Depends(require_admin)):
 async def check_update(admin: User = Depends(require_admin)):
     """检查远端是否有新提交（git fetch + 比对上游分支），只检查不更新。
 
-    返回 {ok, behind, latest, commit}；fetch 失败（如网络不通）返回 ok=False + error，
-    由前端提示，不抛 500。
+    返回 {ok, behind, latest, commits, commit}；commits 为待更新提交清单（旧→新）。
+    fetch 失败（如网络不通）返回 ok=False + error，由前端提示，不抛 500。
     """
     if not (settings.UPDATE_SCRIPT or "").strip():
         raise HTTPException(status_code=400, detail="未配置 UPDATE_SCRIPT（系统更新未启用）")
@@ -331,12 +349,20 @@ async def check_update(admin: User = Depends(require_admin)):
         return {"ok": False, "error": "当前分支未跟踪上游，无法比对更新"}
     behind_n = int(behind or 0)
     latest = None
+    commits: list[str] = []
     if behind_n:
         _, latest = await _git("log", "-1", "--format=%h %s", "@{u}", timeout=15)
+        # 待更新提交清单（旧→新排序，便于用户预览即将更新的内容）
+        code, log_out = await _git(
+            "log", "--format=%h %s", "--reverse", "HEAD..@{u}", timeout=15,
+        )
+        if code == 0 and log_out:
+            commits = [line for line in log_out.splitlines() if line.strip()]
     return {
         "ok": True,
         "behind": behind_n,
         "latest": latest,
+        "commits": commits,
         "commit": await _git_short_head(),
     }
 

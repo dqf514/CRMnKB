@@ -47,7 +47,7 @@ async def test_update_info_disabled_when_no_script(client, monkeypatch):
     monkeypatch.setattr(settings, "UPDATE_SCRIPT", "")
     resp = await client.get("/api/v1/admin/system/update-info")
     assert resp.status_code == 200
-    assert resp.json() == {"enabled": False, "commit": None}
+    assert resp.json() == {"enabled": False, "version": "1.0.0", "commit": None, "history": []}
 
 
 async def test_update_info_enabled_reports_commit(client, monkeypatch, tmp_path):
@@ -57,9 +57,18 @@ async def test_update_info_enabled_reports_commit(client, monkeypatch, tmp_path)
     async def _fake_head():
         return "abc1234"
 
+    async def _fake_history():
+        return [{"commit": "abc1234", "date": "2026-10-01 10:00", "subject": "feat: xxx"}]
+
     monkeypatch.setattr("app.api.admin_system._git_short_head", _fake_head)
+    monkeypatch.setattr("app.api.admin_system._git_history", _fake_history)
     resp = await client.get("/api/v1/admin/system/update-info")
-    assert resp.json() == {"enabled": True, "commit": "abc1234"}
+    assert resp.json() == {
+        "enabled": True,
+        "version": "1.0.0",
+        "commit": "abc1234",
+        "history": [{"commit": "abc1234", "date": "2026-10-01 10:00", "subject": "feat: xxx"}],
+    }
 
 
 async def test_system_update_non_admin_403(client):
@@ -164,7 +173,7 @@ async def test_check_update_up_to_date(client, monkeypatch, tmp_path):
     monkeypatch.setattr("app.api.admin_system._git_short_head", _fake_head)
     resp = await client.post("/api/v1/admin/system/check-update")
     data = resp.json()
-    assert data == {"ok": True, "behind": 0, "latest": None, "commit": "abc1234"}
+    assert data == {"ok": True, "behind": 0, "latest": None, "commits": [], "commit": "abc1234"}
 
 
 async def test_check_update_behind_reports_latest(client, monkeypatch, tmp_path):
@@ -187,6 +196,7 @@ async def test_check_update_behind_reports_latest(client, monkeypatch, tmp_path)
     data = resp.json()
     assert data["ok"] is True and data["behind"] == 3
     assert data["latest"] == "6710367 feat: xxx"
+    assert data["commits"] == ["6710367 feat: xxx"]
 
 
 async def test_check_update_fetch_failure_no_500(client, monkeypatch, tmp_path):

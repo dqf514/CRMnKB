@@ -191,11 +191,28 @@
           更新期间服务会短暂中断（约十几秒），请在空闲时段操作。
         </div>
         <div class="update-row">
-          <span class="update-current">当前版本：<code>{{ updateInfo.commit || '未知' }}</code></span>
+          <span class="update-current">
+            当前版本：<code>v{{ updateInfo.version || '1.0.0' }}</code>
+            <code v-if="updateInfo.commit">{{ updateInfo.commit }}</code>
+          </span>
           <el-button type="primary" :loading="updating" @click="handleSystemUpdate">
             检查并更新
           </el-button>
         </div>
+        <template v-if="updateInfo.history && updateInfo.history.length">
+          <div class="update-history-title">更新历程</div>
+          <el-timeline class="update-history">
+            <el-timeline-item
+              v-for="(h, i) in updateInfo.history"
+              :key="h.commit"
+              :timestamp="h.date"
+              :type="i === 0 ? 'primary' : ''"
+            >
+              <span class="history-subject">{{ h.subject }}</span>
+              <code class="history-commit">{{ h.commit }}</code>
+            </el-timeline-item>
+          </el-timeline>
+        </template>
         <pre v-if="updateOutput" class="update-output">{{ updateOutput }}</pre>
       </el-tab-pane>
     </el-tabs>
@@ -447,7 +464,7 @@ const activeTab = ref('brand')
 const saving = ref(false)
 
 // ========== 系统更新（裸机部署；UPDATE_SCRIPT 未配置时整个 tab 不显示） ==========
-const updateInfo = ref({ enabled: false, commit: null })
+const updateInfo = ref({ enabled: false, version: null, commit: null, history: [] })
 const updating = ref(false)
 const updateOutput = ref('')
 
@@ -472,10 +489,20 @@ async function handleSystemUpdate() {
       ElMessage.success('当前已是最新版本')
       return
     }
+    // 待更新提交清单（最多列 8 条），用 HTML 换行展示
+    const commitLines = (chk.commits || []).slice(0, 8)
+    const more = (chk.commits || []).length - commitLines.length
+    const listHtml = commitLines.length
+      ? `<div style="margin:8px 0 0;font-size:12px;line-height:1.8;color:#606266">` +
+        commitLines.map((c) => `· ${c}`).join('<br>') +
+        (more > 0 ? `<br>… 另有 ${more} 个提交` : '') +
+        `</div>`
+      : ''
     const ok = await confirmDanger(
-      `发现 ${chk.behind} 个新提交${chk.latest ? `（最新：${chk.latest}）` : ''}。更新将从 GitHub 拉取代码并自动重启后端，期间服务短暂中断。是否现在更新？`,
+      `发现 ${chk.behind} 个新提交${chk.latest ? `（最新：${chk.latest}）` : ''}：${listHtml}` +
+        `<div style="margin-top:8px">更新将从 GitHub 拉取代码并自动重启后端，期间服务短暂中断。是否现在更新？</div>`,
       '发现新版本',
-      { confirmButtonText: '现在更新', cancelButtonText: '取消' },
+      { confirmButtonText: '现在更新', cancelButtonText: '取消', dangerouslyUseHTMLString: true },
     )
     if (!ok) return
     const res = await runSystemUpdate()
@@ -588,8 +615,36 @@ onMounted(() => {
   border-radius: 4px;
   padding: 1px 6px;
 }
-.update-output {
-  margin-top: 14px;
+.update-history-title {
+  margin-top: 18px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--app-ink);
+}
+.update-history {
+  margin-top: 12px;
+  padding-left: 2px;
+  max-height: 320px;
+  overflow: auto;
+}
+.update-history :deep(.el-timeline-item__content) {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.history-subject {
+  font-size: 13px;
+  color: var(--app-ink);
+}
+.history-commit {
+  font-size: 12px;
+  color: var(--app-ink-2);
+  background: var(--app-bg);
+  border: 1px solid var(--app-line);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.update-output {  margin-top: 14px;
   max-height: 360px;
   overflow: auto;
   background: var(--app-bg);
