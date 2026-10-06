@@ -55,6 +55,10 @@ class CustomerOut(CustomerBase):
     ddq_status: str = "none"
     ai_brief: str | None = None
     ai_brief_at: datetime | None = None
+    # 私有开关：True=仅 owner+被分享者+admin 可见；None/False=团队共享（默认）
+    is_private: bool | None = None
+    # 当前用户对该客户的权限（read/edit/owner），由端点计算填充
+    my_perm: str | None = None
     created_at: datetime
     updated_at: datetime
 

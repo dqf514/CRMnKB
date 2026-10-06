@@ -8,14 +8,25 @@ from app.models.follow_up import FollowUpRecord
 from app.models.user import User
 from app.schemas.followup import FollowUpCreate, FollowUpOut
 from app.services.followup_hooks import run_after_followup_created
+from app.services.permissions import get_access_for, satisfies
 
 router = APIRouter(prefix="/customers", tags=["followups"])
 
 
-async def _check_customer(db: AsyncSession, tenant_id: int, customer_id: int) -> Customer:
+async def _check_customer(
+    db: AsyncSession, user: User, customer_id: int, required: str = "read"
+) -> Customer:
+    """取客户并校验归属/软删/访问权限（read 无权返回 404，edit 无权返回 403）。"""
     customer = await db.get(Customer, customer_id)
-    if customer is None or customer.tenant_id != tenant_id or customer.deleted_at is not None:
+    if customer is None or customer.tenant_id != user.tenant_id or customer.deleted_at is not None:
         raise HTTPException(status_code=404, detail="客户不存在")
+    perm = "owner" if user.role == "admin" else await get_access_for(
+        db, user.tenant_id, user.id, "customer", customer
+    )
+    if not satisfies(perm, required):
+        if required == "read":
+            raise HTTPException(status_code=404, detail="客户不存在")
+        raise HTTPException(status_code=403, detail="没有该客户的操作权限")
     return customer
 
 
@@ -27,7 +38,7 @@ async def list_followups(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _check_customer(db, user.tenant_id, customer_id)
+    await _check_customer(db, user, customer_id)
     stmt = (
         select(FollowUpRecord)
         .where(FollowUpRecord.customer_id == customer_id)
@@ -47,7 +58,7 @@ async def create_followup(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    await _check_customer(db, user.tenant_id, customer_id)
+    await _check_customer(db, user, customer_id, required="edit")
     record = FollowUpRecord(
         customer_id=customer_id,
         user_id=user.id,

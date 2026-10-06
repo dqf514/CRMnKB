@@ -21,8 +21,12 @@ async def find_duplicate_customers(
     phone: str | None = None,
     exclude_id: int | None = None,
     limit: int = 5,
+    viewer_id: int | None = None,
 ) -> list[dict]:
-    """疑似重复客户：名称 trgm 相似度 > 0.4 或电话精确匹配，按得分取 Top N。"""
+    """疑似重复客户：名称 trgm 相似度 > 0.4 或电话精确匹配，按得分取 Top N。
+
+    viewer_id 非空时按客户可见性过滤（团队共享 ∪ 我负责 ∪ 被分享），
+    避免查重提示泄露他人私有客户的存在。"""
     sql = """
         SELECT id, name, company, phone,
                GREATEST(
@@ -39,6 +43,13 @@ async def find_duplicate_customers(
     if exclude_id is not None:
         sql += " AND id != :exclude_id"
         params["exclude_id"] = exclude_id
+    if viewer_id is not None:
+        sql += (
+            " AND (is_private IS NULL OR is_private = FALSE OR owner_id = :uid"
+            " OR id IN (SELECT resource_id FROM resource_permissions"
+            " WHERE tenant_id = :tid AND resource_type = 'customer' AND user_id = :uid))"
+        )
+        params["uid"] = viewer_id
     sql += " ORDER BY score DESC LIMIT :lim"
     result = await db.execute(text(sql), params)
     return [dict(r) for r in result.mappings().all()]

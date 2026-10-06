@@ -18,6 +18,7 @@ from app.models.notebook import Notebook, NotebookNote
 from app.models.notification import Notification
 from app.models.task import Task
 from app.models.user import User
+from app.services.permissions import customer_visible_clause, resolve_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ async def today_overview(db: AsyncSession, user: User) -> dict:
         )
     ).scalars().all()
 
-    # 久未跟进客户（全租户共享客户池）：最近一次跟进 > STALE_DAYS 或从未跟进
+    # 久未跟进客户（按客户可见性过滤：团队共享 ∪ 我负责 ∪ 被分享）：最近一次跟进 > STALE_DAYS 或从未跟进
     last_fu = (
         select(
             FollowUpRecord.customer_id,
@@ -84,11 +85,15 @@ async def today_overview(db: AsyncSession, user: User) -> dict:
         .group_by(FollowUpRecord.customer_id)
         .subquery()
     )
+    visible = customer_visible_clause(user)
+    stale_where = [Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None)]
+    if visible is not None:
+        stale_where.append(visible)
     stale_rows = (
         await db.execute(
             select(Customer, last_fu.c.last_at)
             .outerjoin(last_fu, last_fu.c.customer_id == Customer.id)
-            .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+            .where(*stale_where)
         )
     ).all()
     stale_customers = []
@@ -119,6 +124,7 @@ async def today_overview(db: AsyncSession, user: User) -> dict:
         "customers": await _count(
             Customer, Customer.tenant_id == user.tenant_id,
             Customer.created_at.between(start, end), Customer.deleted_at.is_(None),
+            *([visible] if visible is not None else []),
         ),
         "notes": await _count(
             NotebookNote, NotebookNote.tenant_id == user.tenant_id,
@@ -131,7 +137,7 @@ async def today_overview(db: AsyncSession, user: User) -> dict:
         Notification.user_id == user.id, Notification.is_read.is_(False),
     )
 
-    # 团队今日动态（审计日志，去掉登录噪声）
+    # 团队今日动态（审计日志，去掉登录噪声）；客户类动态按可见性过滤，避免泄露他人私有客户
     activity_rows = (
         await db.execute(
             select(AuditLog, User.name, User.username)
@@ -142,19 +148,31 @@ async def today_overview(db: AsyncSession, user: User) -> dict:
                 AuditLog.action != "login",
             )
             .order_by(AuditLog.created_at.desc())
-            .limit(15)
+            .limit(30)  # 多拉一些，可见性过滤后截到 15 条
         )
     ).all()
-    activity = [
-        {
+    customer_ids = [
+        rid
+        for a, _, _ in activity_rows
+        if a.resource_type == "customer" and (rid := getattr(a, "resource_id", None))
+    ]
+    customer_perms = (
+        await resolve_permissions(db, user, "customer", customer_ids) if customer_ids else {}
+    )
+    activity = []
+    for a, name, username in activity_rows:
+        rid = getattr(a, "resource_id", None)
+        if a.resource_type == "customer" and rid and rid not in customer_perms:
+            continue
+        activity.append({
             "user": name or username or "系统",
             "action": a.action,
             "resource_type": a.resource_type,
             "detail": a.detail or {},
             "created_at": a.created_at,
-        }
-        for a, name, username in activity_rows
-    ]
+        })
+        if len(activity) >= 15:
+            break
 
     def _task_out(t: Task) -> dict:
         return {

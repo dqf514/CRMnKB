@@ -49,11 +49,6 @@ def _override(db):
     app.dependency_overrides[get_db] = _fake_db
 
 
-def _where_clause(stmt_str: str) -> str:
-    """取 SQL 的 WHERE 段（JOIN ON 里的 customer_id 不算过滤条件）。"""
-    return stmt_str.split("WHERE")[-1]
-
-
 async def test_list_tasks_with_customer_id_filter(client):
     db = _FakeSession()
     _override(db)
@@ -61,7 +56,8 @@ async def test_list_tasks_with_customer_id_filter(client):
     assert resp.status_code == 200
     assert resp.json() == {"items": [], "total": 0}
     assert db.stmts, "应执行了列表查询"
-    assert "customer_id" in _where_clause(db.stmts[-1])
+    # 精确匹配 tasks.customer_id = :param 谓词（可见性子查询里的 customer_id 不算）
+    assert "tasks.customer_id = " in db.stmts[-1]
 
 
 async def test_list_tasks_without_customer_id_filter(client):
@@ -69,4 +65,4 @@ async def test_list_tasks_without_customer_id_filter(client):
     _override(db)
     resp = await client.get("/api/v1/tasks")
     assert resp.status_code == 200
-    assert "customer_id" not in _where_clause(db.stmts[-1])
+    assert "tasks.customer_id = " not in db.stmts[-1]

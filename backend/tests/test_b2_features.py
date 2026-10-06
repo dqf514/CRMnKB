@@ -279,7 +279,7 @@ async def test_import_customers_skip_mode(client, monkeypatch):
     db = _FakeSession()
     _override(db)
 
-    async def _no_dups(db, tenant_id, name=None, phone=None, exclude_id=None, limit=5):
+    async def _no_dups(db, tenant_id, name=None, phone=None, exclude_id=None, limit=5, viewer_id=None):
         return []
 
     monkeypatch.setattr("app.api.customers.find_duplicate_customers", _no_dups)
@@ -301,7 +301,7 @@ async def test_import_customers_overwrite_mode(client, monkeypatch):
     _override(db)
     existing = _customer_ns(name="张三", company="旧公司")
 
-    async def _dup(db, tenant_id, name=None, phone=None, exclude_id=None, limit=5):
+    async def _dup(db, tenant_id, name=None, phone=None, exclude_id=None, limit=5, viewer_id=None):
         return [{"id": 2, "name": "张三", "company": "旧公司", "phone": None, "score": 1.0}]
 
     monkeypatch.setattr("app.api.customers.find_duplicate_customers", _dup)

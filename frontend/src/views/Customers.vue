@@ -57,6 +57,9 @@
         <el-table-column label="名称" min-width="130">
           <template #default="{ row }">
             <el-link type="primary" @click.stop="goDetail(row)">{{ row.name }}</el-link>
+            <el-tooltip v-if="row.is_private" content="私有客户：仅负责人与被授权成员可见" placement="top">
+              <el-tag size="small" type="warning" effect="plain" style="margin-left: 6px">私有</el-tag>
+            </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column prop="company" label="单位" min-width="130" show-overflow-tooltip>
@@ -111,6 +114,7 @@
         <div v-for="row in list" :key="row.id" class="customer-card" @click="goDetail(row)">
           <div class="cc-head">
             <span class="cc-name">{{ row.name }}</span>
+            <el-tag v-if="row.is_private" size="small" type="warning" effect="plain">私有</el-tag>
             <el-tag size="small" :type="enumTagType(customerStatusMap, row.status)">
               {{ enumLabel(customerStatusMap, row.status) }}
             </el-tag>

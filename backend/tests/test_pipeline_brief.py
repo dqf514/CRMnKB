@@ -100,7 +100,8 @@ def _override(db, role="user"):
 
 
 async def test_brief_refresh_202(client, monkeypatch):
-    customer = SimpleNamespace(id=7, tenant_id=1, deleted_at=None, name="张三")
+    # owner_id=1 = 当前用户：权限短路为 owner，不触 ACL 查询
+    customer = SimpleNamespace(id=7, tenant_id=1, deleted_at=None, name="张三", owner_id=1)
     _override(_FakeSession(customer))
 
     called = []
@@ -125,7 +126,7 @@ async def test_brief_refresh_customer_not_found_404(client):
 
 
 async def test_update_customer_ddq_status_validation(client):
-    customer = SimpleNamespace(id=7, tenant_id=1, deleted_at=None, name="张三")
+    customer = SimpleNamespace(id=7, tenant_id=1, deleted_at=None, name="张三", owner_id=1)
 
     class _Session(_FakeSession):
         async def refresh(self, obj):

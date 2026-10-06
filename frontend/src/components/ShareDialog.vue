@@ -5,7 +5,7 @@
       <el-switch :model-value="!isPrivate" :disabled="!isOwner" @change="toggleVisibility" />
       <div class="team-text">
         <div class="team-title">对团队可见</div>
-        <div class="team-sub">开启后租户内所有用户只读；可再单独给某人提升编辑权限</div>
+        <div class="team-sub">{{ teamSubText }}</div>
       </div>
     </div>
 
@@ -57,11 +57,18 @@ const PERM_TAG = { read: 'info', edit: 'warning', owner: 'danger' }
 
 const props = defineProps({
   modelValue: Boolean,
-  resourceType: { type: String, required: true }, // kb / file / notebook
+  resourceType: { type: String, required: true }, // kb / file / notebook / customer
   resource: { type: Object, default: null }, // {id, name, owner_id, is_private, perm}
 })
 const emit = defineEmits(['update:modelValue', 'changed'])
 const visible = computed({ get: () => props.modelValue, set: (v) => emit('update:modelValue', v) })
+
+// 客户是协作型资源：团队可见=全员可编辑（与后端 _TEAM_PERM 一致）
+const teamSubText = computed(() =>
+  props.resourceType === 'customer'
+    ? '开启后团队所有成员可见并可协作编辑；关闭后仅负责人与被授权成员可见'
+    : '开启后租户内所有用户只读；可再单独给某人提升编辑权限'
+)
 
 const authStore = useAuthStore()
 const users = ref([])

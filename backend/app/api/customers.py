@@ -34,6 +34,9 @@ from app.services.customer_io import (
 from app.services.email_draft import build_email_draft_prompt, parse_email_draft
 from app.services.kb import get_or_create_customer_kb
 from app.services.llm import resolve_chat_llm
+from app.services.permissions import (
+    customer_visible_clause, get_access_for, resolve_permissions, satisfies,
+)
 from app.services.pipeline_brief import generate_brief
 from app.services.profile import generate_profile
 
@@ -47,17 +50,20 @@ def _client_ip(request: Request) -> str | None:
 
 
 def _customer_filter_stmt(
-    tenant_id: int,
+    user: User,
     keyword: str | None = None,
     status: str | None = None,
     industry: str | None = None,
     tag: str | None = None,
     ddq_status: str | None = None,
 ):
-    """客户列表/导出共用的筛选（默认排除已软删）。"""
+    """客户列表/导出共用的筛选（默认排除已软删 + 按客户可见性过滤）。"""
     stmt = select(Customer).where(
-        Customer.tenant_id == tenant_id, Customer.deleted_at.is_(None)
+        Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None)
     )
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        stmt = stmt.where(visible)
     if keyword:
         like = f"%{keyword}%"
         stmt = stmt.where(
@@ -92,11 +98,19 @@ async def list_customers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    stmt = _customer_filter_stmt(user.tenant_id, keyword, status, industry, tag, ddq_status)
+    stmt = _customer_filter_stmt(user, keyword, status, industry, tag, ddq_status)
     total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
     stmt = stmt.order_by(Customer.created_at.desc()).offset((page - 1) * page_size).limit(page_size)
     result = await db.execute(stmt)
-    return CustomerListOut(items=result.scalars().all(), total=total or 0)
+    items = result.scalars().all()
+    # 批量补齐当前用户权限（前端据此显示编辑/分享入口）
+    perms = await resolve_permissions(db, user, "customer", [c.id for c in items])
+    out = []
+    for c in items:
+        o = CustomerOut.model_validate(c)
+        o.my_perm = perms.get(c.id)
+        out.append(o)
+    return CustomerListOut(items=out, total=total or 0)
 
 
 @router.post("", response_model=CustomerOut, status_code=201)
@@ -116,7 +130,9 @@ async def create_customer(
     record_audit(db, user, "create", "customer", customer.id, {"name": customer.name}, _client_ip(request))
     await db.commit()
     await db.refresh(customer)
-    return customer
+    out = CustomerOut.model_validate(customer)
+    out.my_perm = "owner"  # 创建者即负责人
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -131,10 +147,11 @@ async def find_duplicates(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """疑似重复客户 Top5：名称 trgm 相似度 > 0.4 或电话精确匹配。"""
+    """疑似重复客户 Top5：名称 trgm 相似度 > 0.4 或电话精确匹配（按可见性过滤）。"""
     if not name and not phone:
         return []
-    return await find_duplicate_customers(db, user.tenant_id, name, phone, exclude_id)
+    viewer_id = None if user.role == "admin" else user.id
+    return await find_duplicate_customers(db, user.tenant_id, name, phone, exclude_id, viewer_id=viewer_id)
 
 
 @router.get("/import-template")
@@ -164,14 +181,20 @@ async def import_customers(
     except Exception:
         raise HTTPException(status_code=400, detail="文件解析失败，请使用下载的模板")
     created = updated = skipped = 0
+    viewer_id = None if user.role == "admin" else user.id
     for row in rows:
-        dups = await find_duplicate_customers(db, user.tenant_id, row["name"], row["phone"])
+        dups = await find_duplicate_customers(db, user.tenant_id, row["name"], row["phone"], viewer_id=viewer_id)
         if dups:
             if mode == "skip":
                 skipped += 1
                 continue
             existing = await db.get(Customer, dups[0]["id"])
             if existing is None or existing.tenant_id != user.tenant_id or existing.deleted_at is not None:
+                skipped += 1
+                continue
+            # 覆盖导入属于写操作：对客户无编辑权限则跳过
+            perm = await get_access_for(db, user.tenant_id, user.id, "customer", existing)
+            if user.role != "admin" and not satisfies(perm, "edit"):
                 skipped += 1
                 continue
             for field in ("company", "position", "phone", "email", "wechat", "industries", "tags", "attributes"):
@@ -204,8 +227,8 @@ async def export_customers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """按列表同款筛选导出 xlsx，上限 1 万行。"""
-    stmt = _customer_filter_stmt(user.tenant_id, keyword, status, industry, tag)
+    """按列表同款筛选导出 xlsx，上限 1 万行（按可见性过滤）。"""
+    stmt = _customer_filter_stmt(user, keyword, status, industry, tag)
     stmt = stmt.order_by(Customer.created_at.desc()).limit(EXPORT_MAX_ROWS)
     customers = (await db.execute(stmt)).scalars().all()
     content = await asyncio.to_thread(build_export, list(customers))
@@ -218,15 +241,38 @@ async def export_customers(
     )
 
 
-async def _get_customer_or_404(db: AsyncSession, tenant_id: int, customer_id: int) -> Customer:
+async def _get_customer_or_404(
+    db: AsyncSession, user: User, customer_id: int, required: str = "read"
+) -> Customer:
+    """取客户并校验归属/软删/访问权限。
+
+    required：read（默认，无权时返回 404 不暴露存在性）/ edit / owner（无权返回 403）。
+    """
     customer = await db.get(Customer, customer_id)
     if (
         customer is None
-        or customer.tenant_id != tenant_id
+        or customer.tenant_id != user.tenant_id
         or customer.deleted_at is not None
     ):
         raise HTTPException(status_code=404, detail="客户不存在")
+    perm = "owner" if user.role == "admin" else await get_access_for(
+        db, user.tenant_id, user.id, "customer", customer
+    )
+    if not satisfies(perm, required):
+        if required == "read":
+            raise HTTPException(status_code=404, detail="客户不存在")
+        raise HTTPException(status_code=403, detail="没有该客户的操作权限")
     return customer
+
+
+async def _customer_out(db: AsyncSession, user: User, customer: Customer) -> CustomerOut:
+    """CustomerOut + 当前用户权限（前端据此控制编辑/分享入口）。"""
+    out = CustomerOut.model_validate(customer)
+    if user.role == "admin":
+        out.my_perm = "owner"
+    else:
+        out.my_perm = await get_access_for(db, user.tenant_id, user.id, "customer", customer)
+    return out
 
 
 @router.get("/{customer_id}", response_model=CustomerOut)
@@ -235,7 +281,8 @@ async def get_customer(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    return await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id)
+    return await _customer_out(db, user, customer)
 
 
 @router.put("/{customer_id}", response_model=CustomerOut)
@@ -246,7 +293,7 @@ async def update_customer(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id, required="edit")
     updates = body.model_dump(exclude_unset=True)
     # ddq_status 取值手工校验（schema 层用 Literal 会返回 422，契约要求 400）
     if "ddq_status" in updates and updates["ddq_status"] not in DDQ_STATUSES:
@@ -272,7 +319,7 @@ async def delete_customer(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id, required="owner")
     # 软删除：连同专属知识库一起进回收站（恢复时整体找回；彻底删除走 /recycle-bin）
     from app.models.knowledge_base import KnowledgeBase
 
@@ -327,7 +374,7 @@ async def get_customer_kb(
     user: User = Depends(get_current_user),
 ):
     """客户专属知识库：无则自动创建（"{客户名}-专属知识库", type=customer）。"""
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id)
     kb = await get_or_create_customer_kb(db, user.tenant_id, customer.id, customer.name)
     await db.commit()
     await db.refresh(kb)
@@ -343,7 +390,7 @@ async def get_customer_profile(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id)
     return CustomerProfileOut(
         profile=customer.profile,
         status=customer.profile_status,
@@ -358,7 +405,7 @@ async def generate_customer_profile(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id, required="edit")
     customer.profile_status = "generating"
     await db.commit()
     background_tasks.add_task(generate_profile, customer.id)
@@ -377,7 +424,7 @@ async def refresh_customer_brief(
     user: User = Depends(get_current_user),
 ):
     """后台重新生成 AI 阶段简报（结果写回 customer.ai_brief，随客户详情下发）。"""
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id, required="edit")
     background_tasks.add_task(generate_brief, customer.id)
     return {"ok": True}
 
@@ -390,7 +437,7 @@ async def create_email_draft(
     user: User = Depends(get_current_user),
 ):
     """AI 邮件草稿：客户资料 + 阶段简报 + 最近 5 条跟进 + Email Guide + 用户意图 → LLM。"""
-    customer = await _get_customer_or_404(db, user.tenant_id, customer_id)
+    customer = await _get_customer_or_404(db, user, customer_id)
     guide_row = await db.get(SystemSetting, "email_guide")
     guide = (guide_row.value or "") if guide_row else ""
     followups = (

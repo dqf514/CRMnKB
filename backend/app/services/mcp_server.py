@@ -39,7 +39,7 @@ from app.models.user import User
 from app.services.agent_approvals import create_approval
 from app.services.llm import resolve_embed_llm
 from app.services.memory import add_memory, delete_memory, list_memories, search_memories
-from app.services.permissions import accessible_ids, get_access, satisfies
+from app.services.permissions import accessible_ids, customer_visible_clause, get_access, get_access_for, satisfies
 from app.services.skills.registry import execute_skill, get_enabled_skills
 from app.services.rag import (
     _find_block,
@@ -338,8 +338,7 @@ def _customer_summary(c: Customer) -> dict:
         "customer_id": c.id,
         "name": c.name,
         "company": c.company,
-        "position": c.position,
-        "phone": c.phone,
+        "position": c.position,        "phone": c.phone,
         "email": c.email,
         "status": c.status,
         "industries": c.industries or [],
@@ -347,6 +346,27 @@ def _customer_summary(c: Customer) -> dict:
         # 前端客户主页路由：模型回答中提及客户时应输出 Markdown 链接 [名称](url)
         "url": f"/customers/{c.id}",
     }
+
+
+async def _ensure_customer_access(
+    db: AsyncSession, user: User, customer_id: int, required: str = "read"
+) -> Customer:
+    """取客户并按 ACL 校验（CRM MCP 工具共用）。
+
+    read 无权时按「不存在」处理，不暴露私有客户存在性；edit/owner 无权明确报错。"""
+    customer = await db.get(Customer, int(customer_id))
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise McpToolError("客户不存在")
+    perm = "owner" if user.role == "admin" else await get_access_for(
+        db, user.tenant_id, user.id, "customer", customer
+    )
+    if not satisfies(perm, required):
+        raise McpToolError("客户不存在" if required == "read" else "没有该客户的操作权限")
+    return customer
 
 
 async def crm_search_customers_impl(
@@ -358,21 +378,25 @@ async def crm_search_customers_impl(
         return []
     limit = max(1, min(int(limit), 50))
     like = f"%{query}%"
+    where = [
+        Customer.tenant_id == user.tenant_id,
+        Customer.deleted_at.is_(None),
+        or_(
+            Customer.name.like(like),
+            Customer.company.like(like),
+            Customer.position.like(like),
+            Customer.phone.like(like),
+            Customer.email.like(like),
+            # JSONB ? 操作符：industries 数组包含该行业名称即命中（同 /customers 列表）
+            Customer.industries.has_key(query),  # noqa: W601
+        ),
+    ]
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        where.append(visible)
     stmt = (
         select(Customer)
-        .where(
-            Customer.tenant_id == user.tenant_id,
-            Customer.deleted_at.is_(None),
-            or_(
-                Customer.name.like(like),
-                Customer.company.like(like),
-                Customer.position.like(like),
-                Customer.phone.like(like),
-                Customer.email.like(like),
-                # JSONB ? 操作符：industries 数组包含该行业名称即命中（同 /customers 列表）
-                Customer.industries.has_key(query),  # noqa: W601
-            ),
-        )
+        .where(*where)
         .order_by(Customer.created_at.desc())
         .limit(limit)
     )
@@ -383,17 +407,20 @@ async def crm_search_customers_impl(
 async def crm_list_customers_impl(
     db: AsyncSession, user: User, limit: int = 20, offset: int = 0
 ) -> dict:
-    """全量客户名单 + 总数（crm_list_customers 的实现）。
+    """当前用户可见的客户名单 + 总数（crm_list_customers 的实现）。
 
-    无需关键词，回答「当前有多少客户 / 分别是谁」类问题；租户内全员可见、
-    排除软删，口径与 crm_search_customers 一致。
+    无需关键词，回答「当前有多少客户 / 分别是谁」类问题；按客户可见性过滤
+    （团队共享 ∪ 我负责 ∪ 被分享，admin 全部），排除软删。
     """
     limit = max(1, min(int(limit), 50))
     offset = max(0, int(offset))
-    base_where = (
+    base_where = [
         Customer.tenant_id == user.tenant_id,
         Customer.deleted_at.is_(None),
-    )
+    ]
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        base_where.append(visible)
     total = await db.scalar(select(func.count(Customer.id)).where(*base_where))
     rows = (
         (
@@ -417,13 +444,7 @@ async def crm_list_customers_impl(
 
 async def crm_get_customer_impl(db: AsyncSession, user: User, customer_id: int) -> dict:
     """客户详情 + 最近 10 条跟进 + 进行中商机概要（crm_get_customer 的实现）。"""
-    customer = await db.get(Customer, int(customer_id))
-    if (
-        customer is None
-        or customer.tenant_id != user.tenant_id
-        or customer.deleted_at is not None
-    ):
-        raise McpToolError("客户不存在")
+    customer = await _ensure_customer_access(db, user, customer_id)
     followups = (
         (
             await db.execute(
@@ -501,12 +522,16 @@ async def crm_list_followups_impl(
     db: AsyncSession, user: User, customer_id: int | None = None,
     days: int | None = None, limit: int = 20,
 ) -> list[dict]:
-    """跟进记录清单（crm_list_followups 的实现）。经 Customer join 做租户隔离。"""
+    """跟进记录清单（crm_list_followups 的实现）。经 Customer join 做租户隔离 + 可见性过滤。"""
     limit = max(1, min(int(limit), 100))
+    where = [Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None)]
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        where.append(visible)
     stmt = (
         select(FollowUpRecord, Customer.name)
         .join(Customer, Customer.id == FollowUpRecord.customer_id)
-        .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+        .where(*where)
         .order_by(FollowUpRecord.created_at.desc())
         .limit(limit)
     )
@@ -533,12 +558,16 @@ async def crm_list_opportunities_impl(
     db: AsyncSession, user: User, customer_id: int | None = None,
     stage: str | None = None, limit: int = 50,
 ) -> list[dict]:
-    """商机清单（crm_list_opportunities 的实现）。经 Customer join 做租户隔离。"""
+    """商机清单（crm_list_opportunities 的实现）。经 Customer join 做租户隔离 + 可见性过滤。"""
     limit = max(1, min(int(limit), 100))
+    where = [Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None)]
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        where.append(visible)
     stmt = (
         select(Opportunity, Customer.name)
         .join(Customer, Customer.id == Opportunity.customer_id)
-        .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+        .where(*where)
         .order_by(Opportunity.updated_at.desc())
         .limit(limit)
     )
@@ -568,12 +597,16 @@ async def crm_list_tasks_impl(
     db: AsyncSession, user: User, status: str | None = None,
     customer_id: int | None = None, limit: int = 50,
 ) -> list[dict]:
-    """任务清单（crm_list_tasks 的实现）。Task 自带 tenant_id。"""
+    """任务清单（crm_list_tasks 的实现）。Task 自带 tenant_id；关联私有客户的任务对无权用户隐藏。"""
     limit = max(1, min(int(limit), 100))
+    where = [Task.tenant_id == user.tenant_id]
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        where.append(or_(Task.customer_id.is_(None), visible))
     stmt = (
         select(Task, Customer.name)
         .outerjoin(Customer, Customer.id == Task.customer_id)
-        .where(Task.tenant_id == user.tenant_id)
+        .where(*where)
         .order_by(Task.created_at.desc())
         .limit(limit)
     )
@@ -597,12 +630,16 @@ async def crm_list_tasks_impl(
 
 
 async def crm_stats_impl(db: AsyncSession, user: User) -> dict:
-    """CRM 经营概览（crm_stats 的实现）：客户阶段分布、商机漏斗、任务与跟进节奏。"""
+    """CRM 经营概览（crm_stats 的实现）：客户阶段分布、商机漏斗、任务与跟进节奏（按客户可见性过滤）。"""
     now = _utcnow()
+    visible = customer_visible_clause(user)
+    cust_where = [Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None)]
+    if visible is not None:
+        cust_where.append(visible)
     cust_rows = (
         await db.execute(
             select(Customer.status, func.count(Customer.id))
-            .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+            .where(*cust_where)
             .group_by(Customer.status)
         )
     ).all()
@@ -614,7 +651,7 @@ async def crm_stats_impl(db: AsyncSession, user: User) -> dict:
                 func.coalesce(func.sum(Opportunity.amount), 0),
             )
             .join(Customer, Customer.id == Opportunity.customer_id)
-            .where(Customer.tenant_id == user.tenant_id, Customer.deleted_at.is_(None))
+            .where(*cust_where)
             .group_by(Opportunity.stage)
         )
     ).all()
@@ -635,8 +672,7 @@ async def crm_stats_impl(db: AsyncSession, user: User) -> dict:
         select(func.count(FollowUpRecord.id))
         .join(Customer, Customer.id == FollowUpRecord.customer_id)
         .where(
-            Customer.tenant_id == user.tenant_id,
-            Customer.deleted_at.is_(None),
+            *cust_where,
             FollowUpRecord.created_at >= now - timedelta(days=7),
         )
     )
@@ -644,8 +680,7 @@ async def crm_stats_impl(db: AsyncSession, user: User) -> dict:
         select(func.count(FollowUpRecord.id))
         .join(Customer, Customer.id == FollowUpRecord.customer_id)
         .where(
-            Customer.tenant_id == user.tenant_id,
-            Customer.deleted_at.is_(None),
+            *cust_where,
             FollowUpRecord.created_at >= now - timedelta(days=30),
         )
     )
@@ -671,14 +706,9 @@ async def crm_add_followup_impl(
 
     不直接写库：只创建审批单（summary 含客户名与内容摘要），admin 批准后由
     services/agent_approvals 的执行器写入 FollowUpRecord。
+    申请时要求对客户有编辑权限（审批不能绕过 ACL）。
     """
-    customer = await db.get(Customer, int(customer_id))
-    if (
-        customer is None
-        or customer.tenant_id != user.tenant_id
-        or customer.deleted_at is not None
-    ):
-        raise McpToolError("客户不存在")
+    customer = await _ensure_customer_access(db, user, customer_id, required="edit")
     content = (content or "").strip()
     if not content:
         raise McpToolError("跟进内容为空")
@@ -715,13 +745,7 @@ async def mail_draft_create_impl(
         raise McpToolError("收件人与主题不能为空")
     name: str | None = None
     if customer_id is not None:
-        customer = await db.get(Customer, int(customer_id))
-        if (
-            customer is None
-            or customer.tenant_id != user.tenant_id
-            or customer.deleted_at is not None
-        ):
-            raise McpToolError("客户不存在")
+        customer = await _ensure_customer_access(db, user, customer_id)
         name = customer.name
     summary = f"发送邮件给 {to}"
     if name:
@@ -778,13 +802,7 @@ async def crm_create_customer_impl(db: AsyncSession, user: User, args: dict) -> 
 
 async def crm_update_customer_impl(db: AsyncSession, user: User, customer_id: int, fields: dict) -> dict:
     """申请更新客户字段（crm_update_customer 的实现）。fields 只含要改的字段。"""
-    customer = await db.get(Customer, int(customer_id))
-    if (
-        customer is None
-        or customer.tenant_id != user.tenant_id
-        or customer.deleted_at is not None
-    ):
-        raise McpToolError("客户不存在")
+    customer = await _ensure_customer_access(db, user, customer_id, required="edit")
     fields = {k: v for k, v in (fields or {}).items() if v is not None}
     if not fields:
         raise McpToolError("没有要更新的字段")
@@ -796,13 +814,7 @@ async def crm_update_customer_impl(db: AsyncSession, user: User, customer_id: in
 
 async def crm_delete_customer_impl(db: AsyncSession, user: User, customer_id: int) -> dict:
     """申请删除客户（crm_delete_customer 的实现）。软删，回收站可恢复。"""
-    customer = await db.get(Customer, int(customer_id))
-    if (
-        customer is None
-        or customer.tenant_id != user.tenant_id
-        or customer.deleted_at is not None
-    ):
-        raise McpToolError("客户不存在")
+    customer = await _ensure_customer_access(db, user, customer_id, required="owner")
     return await _pending_approval_result(
         db, user, "crm_delete_customer", {"customer_id": customer.id},
         f"删除客户「{customer.name}」（软删，可在回收站恢复）",
@@ -811,13 +823,7 @@ async def crm_delete_customer_impl(db: AsyncSession, user: User, customer_id: in
 
 async def crm_create_opportunity_impl(db: AsyncSession, user: User, args: dict) -> dict:
     """申请新增商机（crm_create_opportunity 的实现）。"""
-    customer = await db.get(Customer, int(args.get("customer_id") or 0))
-    if (
-        customer is None
-        or customer.tenant_id != user.tenant_id
-        or customer.deleted_at is not None
-    ):
-        raise McpToolError("客户不存在")
+    customer = await _ensure_customer_access(db, user, args.get("customer_id") or 0, required="edit")
     name = (args.get("name") or "").strip()
     if not name:
         raise McpToolError("商机名称不能为空")
@@ -834,13 +840,7 @@ async def crm_create_task_impl(db: AsyncSession, user: User, args: dict) -> dict
         raise McpToolError("任务标题不能为空")
     summary = f"新增任务「{title}」"
     if args.get("customer_id") is not None:
-        customer = await db.get(Customer, int(args["customer_id"]))
-        if (
-            customer is None
-            or customer.tenant_id != user.tenant_id
-            or customer.deleted_at is not None
-        ):
-            raise McpToolError("客户不存在")
+        customer = await _ensure_customer_access(db, user, args["customer_id"], required="edit")
         summary += f"（关联客户「{customer.name}」）"
     if args.get("due_date"):
         summary += f"，截止 {args['due_date']}"

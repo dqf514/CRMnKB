@@ -7,8 +7,26 @@ from app.models.customer import Customer
 from app.models.opportunity import Opportunity
 from app.models.user import User
 from app.schemas.opportunity import OpportunityCreate, OpportunityOut, OpportunityUpdate
+from app.services.permissions import customer_visible_clause, get_access_for, satisfies
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
+
+
+async def _ensure_customer_access(
+    db: AsyncSession, user: User, customer_id: int, required: str = "edit"
+) -> Customer:
+    """取客户并校验访问权限（商机读写挂到客户权限上）。"""
+    customer = await db.get(Customer, customer_id)
+    if customer is None or customer.tenant_id != user.tenant_id or customer.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="客户不存在")
+    perm = "owner" if user.role == "admin" else await get_access_for(
+        db, user.tenant_id, user.id, "customer", customer
+    )
+    if not satisfies(perm, required):
+        if required == "read":
+            raise HTTPException(status_code=404, detail="客户不存在")
+        raise HTTPException(status_code=403, detail="没有该客户的操作权限")
+    return customer
 
 
 @router.get("", response_model=list[OpportunityOut])
@@ -27,6 +45,9 @@ async def list_opportunities(
         .offset((page - 1) * page_size)
         .limit(page_size)
     )
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        stmt = stmt.where(visible)
     if customer_id is not None:
         stmt = stmt.where(Opportunity.customer_id == customer_id)
     result = await db.execute(stmt)
@@ -39,9 +60,7 @@ async def create_opportunity(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    customer = await db.get(Customer, body.customer_id)
-    if customer is None or customer.tenant_id != user.tenant_id or customer.deleted_at is not None:
-        raise HTTPException(status_code=404, detail="客户不存在")
+    await _ensure_customer_access(db, user, body.customer_id, required="edit")
     opportunity = Opportunity(owner_id=user.id, **body.model_dump())
     db.add(opportunity)
     await db.commit()
@@ -69,6 +88,7 @@ async def update_opportunity(
     user: User = Depends(get_current_user),
 ):
     opportunity = await _get_opportunity_or_404(db, user.tenant_id, opp_id)
+    await _ensure_customer_access(db, user, opportunity.customer_id, required="edit")
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(opportunity, field, value)
     await db.commit()
@@ -83,5 +103,6 @@ async def delete_opportunity(
     user: User = Depends(get_current_user),
 ):
     opportunity = await _get_opportunity_or_404(db, user.tenant_id, opp_id)
+    await _ensure_customer_access(db, user, opportunity.customer_id, required="edit")
     await db.delete(opportunity)
     await db.commit()

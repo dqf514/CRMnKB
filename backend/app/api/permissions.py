@@ -1,4 +1,4 @@
-"""内容分享 / 权限管理 API（资源：kb / file / folder / notebook）。
+"""内容分享 / 权限管理 API（资源：kb / file / folder / notebook / customer）。
 
 仅资源所有者（或管理员）可管理分享。分享时给目标用户发通知（type=share）。
 """
@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
+from app.models.customer import Customer
 from app.models.knowledge_base import KnowledgeBase
 from app.models.library_file import LibraryFile
 from app.models.library_folder import LibraryFolder
@@ -25,11 +26,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/permissions", tags=["permissions"])
 
-ResourceType = Literal["kb", "file", "folder", "notebook"]
+ResourceType = Literal["kb", "file", "folder", "notebook", "customer"]
 _PERMISSION = Literal["read", "edit", "owner"]
 
-_MODELS = {"kb": KnowledgeBase, "file": LibraryFile, "folder": LibraryFolder, "notebook": Notebook}
-_LABEL = {"kb": "知识库", "file": "文档", "folder": "文件夹", "notebook": "工作区"}
+_MODELS = {
+    "kb": KnowledgeBase, "file": LibraryFile, "folder": LibraryFolder,
+    "notebook": Notebook, "customer": Customer,
+}
+_LABEL = {"kb": "知识库", "file": "文档", "folder": "文件夹", "notebook": "工作区", "customer": "客户"}
 _PERM_LABEL = {"read": "只读", "edit": "编辑", "owner": "所有权"}
 
 

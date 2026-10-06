@@ -47,6 +47,8 @@ def _customer(cid=5, **kw):
         "position": "总监", "phone": "138", "email": "a@b.com", "status": "intention",
         "industries": ["制造"], "tags": ["重点"], "wechat": None, "address": None,
         "source": "展会", "birthday": None, "profile": "画像文本", "deleted_at": None,
+        # 权限字段：默认团队共享（is_private=False），owner_id=1 与默认用户一致
+        "owner_id": 1, "is_private": False,
     }
     base.update(kw)
     return SimpleNamespace(**base)

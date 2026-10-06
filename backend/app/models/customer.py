@@ -40,6 +40,8 @@ class Customer(Base):
     ai_brief: Mapped[str | None] = mapped_column(Text)
     ai_brief_at: Mapped[datetime | None]
     owner_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    # 私有开关：TRUE=私有（仅 owner + 被分享者 + admin）；NULL/FALSE=团队共享（默认，沿用历史行为）
+    is_private: Mapped[bool | None]
     # 软删除时间（回收站）；NULL = 正常
     deleted_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())

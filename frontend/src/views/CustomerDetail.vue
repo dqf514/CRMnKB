@@ -28,11 +28,15 @@
         <div class="head-id">
           <div class="name-row">
             <h1 class="cname">{{ customer.name }}</h1>
+            <el-tooltip v-if="customer.is_private" content="私有客户：仅负责人与被授权成员可见" placement="top">
+              <el-tag size="small" type="warning" effect="dark" class="private-tag">私有</el-tag>
+            </el-tooltip>
             <el-select
               :model-value="customer.status"
               size="small"
               class="mini-select"
               :loading="statusSaving"
+              :disabled="!canEdit"
               @change="handleStatusChange"
             >
               <el-option v-for="(v, k) in customerStatusMap" :key="k" :label="v.label" :value="k" />
@@ -42,6 +46,7 @@
               size="small"
               class="mini-select"
               :loading="ddqSaving"
+              :disabled="!canEdit"
               @change="handleDdqChange"
             >
               <el-option v-for="(v, k) in ddqStatusMap" :key="k" :label="'DDQ·' + v.label" :value="k" />
@@ -56,9 +61,10 @@
           </div>
         </div>
         <div class="head-actions">
-          <el-button size="small" :icon="Edit" @click="editVisible = true">编辑</el-button>
+          <el-button v-if="canManage" size="small" :icon="Share" @click="shareVisible = true">分享</el-button>
+          <el-button v-if="canEdit" size="small" :icon="Edit" @click="editVisible = true">编辑</el-button>
           <el-button size="small" :icon="Message" @click="openEmailDialog">邮件草稿</el-button>
-          <el-button size="small" type="danger" plain :icon="Delete" @click="handleDelete">删除</el-button>
+          <el-button v-if="canManage" size="small" type="danger" plain :icon="Delete" @click="handleDelete">删除</el-button>
         </div>
       </div>
       <div class="meta-row">
@@ -397,6 +403,14 @@
 
     <!-- 文件预览 -->
     <FilePreview v-model="previewVisible" :file="previewFile" />
+
+    <!-- 客户分享/私有控制（复用通用分享弹窗，resourceType=customer） -->
+    <ShareDialog
+      v-model="shareVisible"
+      resource-type="customer"
+      :resource="customer ? { ...customer, perm: customer.my_perm } : null"
+      @changed="loadAll"
+    />
   </div>
 </template>
 
@@ -405,7 +419,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowLeft, ArrowRight, Plus, Upload, UploadFilled, Loading, Refresh, Message, Edit, Delete,
-  Phone, ChatDotRound, Location, Link, Present, Clock,
+  Phone, ChatDotRound, Location, Link, Present, Clock, Share,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { confirmDanger } from '../utils/confirmDanger'
@@ -424,6 +438,7 @@ import { ensureUploadFormats, isEnabledExt, enabledAcceptStr } from '../utils/up
 import { useThemeStore } from '../stores/theme'
 import FilePreview from '../components/FilePreview.vue'
 import CustomerFormDrawer from '../components/CustomerFormDrawer.vue'
+import ShareDialog from '../components/ShareDialog.vue'
 import {
   customerStatusMap, followupTypeMap, opportunityStageMap,
   ddqStatusMap, taskPriorityMap,
@@ -452,6 +467,10 @@ function goNav(delta) {
 
 const loading = ref(false)
 const customer = ref(null)
+// 权限：my_perm 由后端下发（read/edit/owner；admin 恒为 owner）
+const canEdit = computed(() => ['edit', 'owner'].includes(customer.value?.my_perm))
+const canManage = computed(() => customer.value?.my_perm === 'owner')
+const shareVisible = ref(false)
 const followups = ref([])
 const opportunities = ref([])
 const editVisible = ref(false)

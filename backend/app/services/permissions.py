@@ -1,10 +1,12 @@
 """内容权限 / 分享核心。
 
 模型：
-- 每个资源有 owner（kb/file/folder 用 owner_id，notebook 用 created_by）
-- is_private：TRUE=私有（仅 owner + 被分享者）；NULL/FALSE=团队可见（租户内所有人只读）
+- 每个资源有 owner（kb/file/folder/customer 用 owner_id，notebook 用 created_by）
+- is_private：TRUE=私有（仅 owner + 被分享者）；NULL/FALSE=团队可见
+  （文档/知识库/工作区=租户内只读；客户=协作型资源，团队可见=全员可编辑）
 - resource_permissions ACL：把资源分享给指定用户，权限 read/edit/owner
 - 管理员（role=admin）绕过所有 ACL
+- customer 无文件夹继承，走通用直接权限；列表类查询用 customer_visible_clause 做 SQL 级过滤
 
 文件夹权限管理标准（级联继承，类网盘）：
 - 文件夹是"访问容器"：能访问某文件夹 → 其全部子文件夹及其中文件自动可见。
@@ -20,6 +22,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.knowledge_base import KnowledgeBase
+from app.models.customer import Customer
 from app.models.library_file import LibraryFile
 from app.models.library_folder import LibraryFolder
 from app.models.notebook import Notebook
@@ -28,10 +31,20 @@ from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
-_MODELS = {"kb": KnowledgeBase, "file": LibraryFile, "folder": LibraryFolder, "notebook": Notebook}
-_OWNER_FIELD = {"kb": "owner_id", "file": "owner_id", "folder": "owner_id", "notebook": "created_by"}
+_MODELS = {
+    "kb": KnowledgeBase, "file": LibraryFile, "folder": LibraryFolder,
+    "notebook": Notebook, "customer": Customer,
+}
+_OWNER_FIELD = {
+    "kb": "owner_id", "file": "owner_id", "folder": "owner_id",
+    "notebook": "created_by", "customer": "owner_id",
+}
 
 _LEVEL = {"none": 0, "read": 1, "edit": 2, "owner": 3}
+
+# 团队可见时的默认权限：文档/知识库/工作区为只读（read）；
+# 客户是协作型资源，团队共享保持历史行为=全员可编辑（edit），私有后按 ACL 收缩。
+_TEAM_PERM = {"customer": "edit"}
 
 
 def level(p: str | None) -> int:
@@ -99,7 +112,7 @@ async def _get_direct_access(
     """单个资源上的直接权限（不含祖先文件夹继承）：owner > ACL > 团队可见(read) > None。"""
     if getattr(obj, _OWNER_FIELD[rtype]) == user_id:
         return "owner"
-    perm: str | None = "read" if is_team_visible(obj.is_private) else None
+    perm: str | None = _TEAM_PERM.get(rtype, "read") if is_team_visible(obj.is_private) else None
     acl = await db.scalar(
         select(ResourcePermission.permission).where(
             ResourcePermission.tenant_id == tenant_id,
@@ -111,6 +124,17 @@ async def _get_direct_access(
     if acl and level(acl) > level(perm):
         perm = acl
     return perm
+
+
+async def get_access_for(
+    db: AsyncSession, tenant_id: int, user_id: int, rtype: str, obj
+) -> str | None:
+    """对已取出的对象计算权限（避免重复 db.get）。
+
+    仅适用于无文件夹继承的资源类型（kb/notebook/customer）；folder/file 请用 get_access。"""
+    if obj is None or obj.tenant_id != tenant_id:
+        return None
+    return await _get_direct_access(db, tenant_id, user_id, rtype, obj)
 
 
 async def get_access(
@@ -163,7 +187,7 @@ async def _direct_perms(
         if getattr(r, _OWNER_FIELD[rtype]) == user.id:
             result[r.id] = "owner"
         elif is_team_visible(r.is_private):
-            result[r.id] = "read"
+            result[r.id] = _TEAM_PERM.get(rtype, "read")
     acl_rows = (
         await db.execute(
             select(ResourcePermission).where(
@@ -332,3 +356,22 @@ async def ensure_owner(
     perm = await get_access(db, user.tenant_id, user.id, rtype, rid)
     if perm != "owner":
         raise HTTPException(status_code=403, detail="仅资源所有者可执行此操作")
+
+
+def customer_visible_clause(user: User):
+    """客户可见性 SQL 过滤：管理员返回 None（不过滤）；
+    普通用户 = 团队共享（is_private NULL/FALSE）∪ 我负责 ∪ 被分享给我。"""
+    if user.role == "admin":
+        return None
+    return or_(
+        Customer.is_private.is_(None),
+        Customer.is_private.is_(False),
+        Customer.owner_id == user.id,
+        Customer.id.in_(
+            select(ResourcePermission.resource_id).where(
+                ResourcePermission.tenant_id == user.tenant_id,
+                ResourcePermission.resource_type == "customer",
+                ResourcePermission.user_id == user.id,
+            )
+        ),
+    )

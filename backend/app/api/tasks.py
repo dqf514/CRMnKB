@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -9,6 +9,7 @@ from app.models.customer import Customer
 from app.models.task import Task
 from app.models.user import User
 from app.schemas.task import TaskCreate, TaskListOut, TaskOut, TaskUpdate
+from app.services.permissions import customer_visible_clause, get_access_for, satisfies
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -16,6 +17,22 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 def _utcnow() -> datetime:
     """naive UTC（项目约定：连接时区已固定 UTC，列均为 timestamp without time zone）。"""
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+async def _ensure_customer_edit(db: AsyncSession, user: User, customer_id: int) -> None:
+    """任务挂到客户上时，要求对该客户有编辑权限（客户不存在返回 404，无权 403）。"""
+    customer = await db.get(Customer, customer_id)
+    if (
+        customer is None
+        or customer.tenant_id != user.tenant_id
+        or customer.deleted_at is not None
+    ):
+        raise HTTPException(status_code=404, detail="客户不存在")
+    perm = "owner" if user.role == "admin" else await get_access_for(
+        db, user.tenant_id, user.id, "customer", customer
+    )
+    if not satisfies(perm, "edit"):
+        raise HTTPException(status_code=403, detail="没有该客户的操作权限")
 
 
 @router.get("", response_model=TaskListOut)
@@ -32,6 +49,10 @@ async def list_tasks(
         filters.append(Task.status == status)
     if customer_id is not None:
         filters.append(Task.customer_id == customer_id)
+    # 关联了私有客户的任务，对无权限用户隐藏（无关联客户的任务不受影响）
+    visible = customer_visible_clause(user)
+    if visible is not None:
+        filters.append(or_(Task.customer_id.is_(None), visible))
 
     total = await db.scalar(select(func.count()).select_from(Task).where(*filters))
     stmt = (
@@ -58,13 +79,7 @@ async def create_task(
     user: User = Depends(get_current_user),
 ):
     if body.customer_id is not None:
-        customer = await db.get(Customer, body.customer_id)
-        if (
-            customer is None
-            or customer.tenant_id != user.tenant_id
-            or customer.deleted_at is not None
-        ):
-            raise HTTPException(status_code=404, detail="客户不存在")
+        await _ensure_customer_edit(db, user, body.customer_id)
     task = Task(
         tenant_id=user.tenant_id,
         user_id=user.id,
@@ -86,6 +101,14 @@ async def _get_task_or_404(db: AsyncSession, tenant_id: int, task_id: int) -> Ta
     return task
 
 
+async def _get_task_for_edit(db: AsyncSession, user: User, task_id: int) -> Task:
+    """取任务并校验：关联了客户时要求对该客户有编辑权限。"""
+    task = await _get_task_or_404(db, user.tenant_id, task_id)
+    if task.customer_id is not None:
+        await _ensure_customer_edit(db, user, task.customer_id)
+    return task
+
+
 @router.put("/{task_id}", response_model=TaskOut)
 async def update_task(
     task_id: int,
@@ -93,7 +116,7 @@ async def update_task(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    task = await _get_task_or_404(db, user.tenant_id, task_id)
+    task = await _get_task_for_edit(db, user, task_id)
     for field, value in body.model_dump(exclude_unset=True).items():
         setattr(task, field, value)
     if task.status == "completed" and task.completed_at is None:
@@ -109,7 +132,7 @@ async def complete_task(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    task = await _get_task_or_404(db, user.tenant_id, task_id)
+    task = await _get_task_for_edit(db, user, task_id)
     task.status = "completed"
     task.completed_at = _utcnow()
     await db.commit()
@@ -123,6 +146,6 @@ async def delete_task(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    task = await _get_task_or_404(db, user.tenant_id, task_id)
+    task = await _get_task_for_edit(db, user, task_id)
     await db.delete(task)
     await db.commit()

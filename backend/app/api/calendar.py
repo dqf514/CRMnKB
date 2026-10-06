@@ -2,14 +2,14 @@
 
 时间口径（项目约定）：DB TIMESTAMP 列存 naive UTC，展示按服务器本地日期；
 商机 expected_close_date 与客户 birthday 本身是 date 列，不做时区换算。
-可见性口径与任务列表一致（api/tasks.py）：租户全员可见（仅按 tenant_id 过滤）。
+可见性口径：任务/商机/生日均按客户可见性过滤（私有客户的事件仅 owner/被分享者/admin 可见）。
 """
 import jwt
 from datetime import date, datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
@@ -18,6 +18,7 @@ from app.models.customer import Customer
 from app.models.opportunity import Opportunity
 from app.models.task import Task
 from app.models.user import User
+from app.services.permissions import customer_visible_clause
 
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
@@ -49,21 +50,26 @@ def _birthday_occurrences(birthday: date, start: date, end: date) -> list[date]:
 
 
 async def _collect_events(
-    db: AsyncSession, tenant_id: int, start: date, end: date
+    db: AsyncSession, user: User, start: date, end: date
 ) -> list[dict]:
-    """聚合租户在 [start, end]（本地日期，含边界）内的三类日历事件，按日期排序。"""
+    """聚合用户在 [start, end]（本地日期，含边界）内可见的三类日历事件，按日期排序。"""
     events: list[dict] = []
+    tenant_id = user.tenant_id
+    visible = customer_visible_clause(user)
 
     # 1) 任务到期：due_date 为 naive UTC，查库放宽一天、再按本地日期精确过滤
+    task_where = [
+        Task.tenant_id == tenant_id,
+        Task.due_date.is_not(None),
+        Task.due_date >= datetime.combine(start - timedelta(days=1), time.min),
+        Task.due_date < datetime.combine(end + timedelta(days=2), time.min),
+    ]
+    if visible is not None:
+        task_where.append(or_(Task.customer_id.is_(None), visible))
     stmt = (
         select(Task, Customer.name)
         .outerjoin(Customer, Customer.id == Task.customer_id)
-        .where(
-            Task.tenant_id == tenant_id,
-            Task.due_date.is_not(None),
-            Task.due_date >= datetime.combine(start - timedelta(days=1), time.min),
-            Task.due_date < datetime.combine(end + timedelta(days=2), time.min),
-        )
+        .where(*task_where)
     )
     for task, customer_name in (await db.execute(stmt)).all():
         local_date = _to_local_date(task.due_date)
@@ -81,16 +87,19 @@ async def _collect_events(
         })
 
     # 2) 商机预计成交日：expected_close_date 为 date 列，直接按区间过滤
+    opp_where = [
+        Customer.tenant_id == tenant_id,
+        Customer.deleted_at.is_(None),
+        Opportunity.expected_close_date.is_not(None),
+        Opportunity.expected_close_date >= start,
+        Opportunity.expected_close_date <= end,
+    ]
+    if visible is not None:
+        opp_where.append(visible)
     stmt = (
         select(Opportunity, Customer.name)
         .join(Customer, Customer.id == Opportunity.customer_id)
-        .where(
-            Customer.tenant_id == tenant_id,
-            Customer.deleted_at.is_(None),
-            Opportunity.expected_close_date.is_not(None),
-            Opportunity.expected_close_date >= start,
-            Opportunity.expected_close_date <= end,
-        )
+        .where(*opp_where)
     )
     for opp, customer_name in (await db.execute(stmt)).all():
         events.append({
@@ -105,11 +114,14 @@ async def _collect_events(
         })
 
     # 3) 客户生日：按月日匹配区间内每一年的 occurrence
-    stmt = select(Customer).where(
+    birthday_where = [
         Customer.tenant_id == tenant_id,
         Customer.deleted_at.is_(None),
         Customer.birthday.is_not(None),
-    )
+    ]
+    if visible is not None:
+        birthday_where.append(visible)
+    stmt = select(Customer).where(*birthday_where)
     for customer in (await db.execute(stmt)).scalars().all():
         for occ in _birthday_occurrences(customer.birthday, start, end):
             events.append({
@@ -136,7 +148,7 @@ async def list_events(
 ):
     if end < start:
         raise HTTPException(status_code=422, detail="end 不能早于 start")
-    return {"events": await _collect_events(db, user.tenant_id, start, end)}
+    return {"events": await _collect_events(db, user, start, end)}
 
 
 @router.get("/feed-token")
@@ -206,7 +218,7 @@ async def calendar_feed(
     today = _local_today()
     events = await _collect_events(
         db,
-        user.tenant_id,
+        user,
         today - timedelta(days=_FEED_PAST_DAYS),
         today + timedelta(days=_FEED_FUTURE_DAYS),
     )

@@ -180,7 +180,7 @@ async def test_events_requires_auth(client):
 def _queue_feed_db(db):
     """feed.ics 的 fake session：先 queue_get 用户，再按序 queue_execute 任务/商机/客户。"""
     today = date.today()
-    db.queue_get(SimpleNamespace(id=1, tenant_id=1, username="u", name="用户", status=1))
+    db.queue_get(SimpleNamespace(id=1, tenant_id=1, username="u", name="用户", role="user", status=1))
     db.queue_execute([
         (_task(11, datetime.combine(today + timedelta(days=3), datetime.min.time()).replace(hour=12)), "客户甲"),
     ])
@@ -329,8 +329,8 @@ async def test_events_tenant_isolation(real_db):
     ])
     await session.commit()
 
-    events = await _collect_events(session, 1, date(2026, 3, 1), date(2026, 3, 31))
+    events = await _collect_events(session, SimpleNamespace(id=1, tenant_id=1, role="admin"), date(2026, 3, 1), date(2026, 3, 31))
     assert {e["id"] for e in events} == {"task:1", "opp:1", "birthday:1"}
 
-    events_t2 = await _collect_events(session, 2, date(2026, 3, 1), date(2026, 3, 31))
+    events_t2 = await _collect_events(session, SimpleNamespace(id=2, tenant_id=2, role="admin"), date(2026, 3, 1), date(2026, 3, 31))
     assert {e["id"] for e in events_t2} == {"task:2", "opp:2", "birthday:2"}

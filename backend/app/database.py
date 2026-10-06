@@ -49,6 +49,8 @@ async def init_db() -> None:
         )
         await conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS ai_brief TEXT"))
         await conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS ai_brief_at TIMESTAMP"))
+        # 客户私有开关（TRUE=仅 owner+被分享者+admin 可见；NULL/FALSE=团队共享，默认沿用历史行为）
+        await conn.execute(text("ALTER TABLE customers ADD COLUMN IF NOT EXISTS is_private BOOLEAN"))
         # P1 跟进记录：下一步行动
         await conn.execute(text("ALTER TABLE follow_up_records ADD COLUMN IF NOT EXISTS next_step TEXT"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(100)"))
