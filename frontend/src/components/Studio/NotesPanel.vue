@@ -1,11 +1,11 @@
 <template>
   <div class="notes-panel">
-    <!-- 顶部：新建工作区 + 操作 -->
+    <!-- 顶部：新建笔记 + 操作 -->
     <div class="notes-header">
-      <span class="title">工作区 ({{ notes.length }})</span>
+      <span class="title">笔记 ({{ notes.length }})</span>
       <el-button-group>
-        <el-tooltip content="新建工作区">
-          <el-button :icon="Plus" size="small" link aria-label="新建工作区" @click="onNew" />
+        <el-tooltip content="新建笔记">
+          <el-button :icon="Plus" size="small" link aria-label="新建笔记" @click="onNew" />
         </el-tooltip>
         <el-tooltip content="刷新">
           <el-button :icon="Refresh" size="small" link aria-label="刷新" @click="refresh" />
@@ -13,7 +13,7 @@
       </el-button-group>
     </div>
 
-    <!-- 工作区内容列表 -->
+    <!-- 笔记列表 -->
     <div class="notes-list" v-loading="loading">
       <div
         v-for="note in notes"
@@ -28,13 +28,13 @@
         </div>
         <div class="note-meta">{{ formatDate(note.updated_at) }}</div>
       </div>
-      <el-empty v-if="!loading && !notes.length" description="暂无工作区" :image-size="60" />
+      <el-empty v-if="!loading && !notes.length" description="暂无笔记" :image-size="60" />
     </div>
 
     <!-- 编辑器 -->
     <div v-if="selectedNote" class="editor">
       <div class="editor-toolbar">
-        <el-input v-model="titleDraft" placeholder="工作区标题" size="small" class="title-input" />
+        <el-input v-model="titleDraft" placeholder="笔记标题" size="small" class="title-input" />
         <el-button-group>
           <el-tooltip content="预览">
             <el-button :icon="View" size="small" link aria-label="预览" @click="previewMode = !previewMode" />
