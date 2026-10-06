@@ -245,6 +245,7 @@ import CustomerFormDrawer from '../components/CustomerFormDrawer.vue'
 import { customerStatusMap, ddqStatusMap, enumLabel, enumTagType, formatDateTime, CUSTOMER_TAG_PRESETS } from '../utils/format'
 import { usePagedFetch } from '../utils/usePagedFetch'
 import { confirmDanger } from '../utils/confirmDanger'
+import { saveCustomerNav, loadCustomerNav, clearCustomerNav } from '../utils/customerNav'
 
 const router = useRouter()
 const industryStore = useIndustryStore()
@@ -328,6 +329,9 @@ function openCreate() {
 }
 
 function goDetail(row) {
+  // 跳转前把当前筛选/排序下的客户 id 序列与列表 query 存入 sessionStorage：
+  // 详情页据此提供「上一个/下一个」，返回本页时据此恢复筛选/页码/视图模式
+  saveCustomerNav({ ids: list.value.map((c) => c.id), query: { ...query }, viewMode: viewMode.value })
   router.push(`/customers/${row.id}`)
 }
 
@@ -472,6 +476,11 @@ async function handleDeleteIndustry(row) {
 }
 
 onMounted(() => {
+  // 从客户详情返回时恢复离开前的列表上下文（筛选/页码/视图模式），恢复后清除避免陈旧数据串扰
+  const nav = loadCustomerNav()
+  if (nav?.query) Object.assign(query, nav.query)
+  if (nav?.viewMode) viewMode.value = nav.viewMode
+  clearCustomerNav()
   loadList()
   industryStore.load()
 })

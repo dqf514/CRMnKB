@@ -1,104 +1,103 @@
 <template>
   <el-container class="layout">
-    <!-- 桌面端固定侧边栏（240px，Manus 风：品牌 → 新的工作区/搜索 → 工作区列表 → 底部导航 → 用户行） -->
-    <el-aside v-if="!isMobile" width="240px" class="aside">
-      <!-- 品牌行 -->
+    <!-- 桌面端固定侧边栏（240px，Manus 风：品牌 → 新的工作区/搜索 → 工作区列表 → 底部导航 → 用户行）。
+         支持收起为 64px 图标态（localStorage 持久化），收起时鼠标悬停临时展开 -->
+    <el-aside
+      v-if="!isMobile"
+      :width="sideCollapsed ? '64px' : '240px'"
+      class="aside"
+      :class="{ 'aside-collapsed': sideCollapsed }"
+      @mouseenter="onAsideEnter"
+      @mouseleave="onAsideLeave"
+    >
+      <!-- 品牌行：收起时纵向堆叠 logo + 展开按钮 -->
       <div class="brand">
         <img class="brand-logo" :src="brandStore.logoUrl" :alt="brandStore.systemName" />
-        <span class="brand-name">{{ brandStore.systemName }}</span>
+        <span v-show="!sideCollapsed" class="brand-name">{{ brandStore.systemName }}</span>
+        <el-tooltip :content="collapsed ? '展开侧栏' : '收起侧栏'" placement="right">
+          <el-icon class="collapse-btn" :size="15" @click="toggleCollapse">
+            <Expand v-if="collapsed" />
+            <Fold v-else />
+          </el-icon>
+        </el-tooltip>
       </div>
 
-      <!-- 主操作：新的工作区 + 搜索 -->
+      <!-- 主操作：新的工作区 + 搜索（收起时只留图标，悬停有 tooltip） -->
       <div class="side-actions">
-        <button class="btn-new-task" @click="createNewTask">
-          <el-icon :size="15"><Plus /></el-icon>
-          <span>新的工作区</span>
-        </button>
-        <button class="btn-search" @click="openGlobalSearch">
-          <el-icon :size="15"><Search /></el-icon>
-          <span>搜索</span>
-          <kbd class="kbd">Ctrl K</kbd>
-        </button>
+        <el-tooltip content="新的工作区" placement="right" :disabled="!sideCollapsed">
+          <button class="btn-new-task" @click="createNewTask">
+            <el-icon :size="15"><Plus /></el-icon>
+            <span v-show="!sideCollapsed">新的工作区</span>
+          </button>
+        </el-tooltip>
+        <el-tooltip content="搜索（Ctrl K）" placement="right" :disabled="!sideCollapsed">
+          <button class="btn-search" @click="openGlobalSearch">
+            <el-icon :size="15"><Search /></el-icon>
+            <span v-show="!sideCollapsed">搜索</span>
+            <kbd v-show="!sideCollapsed" class="kbd">Ctrl K</kbd>
+          </button>
+        </el-tooltip>
       </div>
 
-      <!-- 中部弹性滚动区：工作区列表；admin 处于 /admin 路由时替换为管理菜单 -->
+      <!-- 中部弹性滚动区：工作区列表（收起时隐藏，悬停展开后可见） -->
       <div class="side-scroll">
-        <template v-if="showAdminMenu">
-          <!-- 返回工作台：恢复最近打开的工作区（studio 自动 reopen 上次的 Notebook） -->
-          <button class="btn-back" @click="goBackFromAdmin">
-            <el-icon :size="15"><Back /></el-icon>
-            <span>返回工作台</span>
-          </button>
-          <div v-for="g in adminGroups" :key="g.key" class="side-group">
-            <div class="side-group-label">{{ g.label }}</div>
-            <div
-              v-for="m in g.items"
-              :key="m.path"
-              class="nav-item"
-              :class="{ active: isNavActive(m.path) }"
-              @click="router.push(m.path)"
-            >
-              <el-icon :size="16"><component :is="m.icon" /></el-icon>
-              <span>{{ m.label }}</span>
-            </div>
-          </div>
-        </template>
-        <template v-else>
+        <template v-if="!sideCollapsed">
           <div class="side-group-label">工作区</div>
           <SidebarWorkspaces />
         </template>
       </div>
 
-      <!-- 底部导航组（admin 管理菜单展开时隐藏，避免与常规导航堆叠） -->
-      <template v-if="!showAdminMenu">
-        <div class="side-divider" />
-        <nav class="side-nav">
-        <template v-for="item in navItems" :key="item.key || item.path">
-          <!-- 带子项的分组：点组头展开/收起，子项缩进排列 -->
-          <template v-if="item.children">
+      <!-- 底部导航组（admin 页面也保留常规导航，不再整块替换侧栏） -->
+      <div class="side-divider" />
+      <nav class="side-nav">
+      <template v-for="item in navItems" :key="item.key || item.path">
+        <!-- 带子项的分组：点组头展开/收起，子项缩进排列 -->
+        <template v-if="item.children">
+          <el-tooltip :content="item.label" placement="right" :disabled="!sideCollapsed">
             <div
               class="nav-item"
               :class="{ active: isGroupActive(item) }"
               @click="toggleGroup(item.key)"
             >
               <el-icon :size="16"><component :is="item.icon" /></el-icon>
-              <span>{{ item.label }}</span>
-              <el-icon :size="12" class="nav-caret" :class="{ open: groupOpen[item.key] }">
+              <span v-show="!sideCollapsed">{{ item.label }}</span>
+              <el-icon v-show="!sideCollapsed" :size="12" class="nav-caret" :class="{ open: groupOpen[item.key] }">
                 <ArrowDown />
               </el-icon>
             </div>
-            <div v-show="groupOpen[item.key]" class="nav-children">
-              <div
-                v-for="c in item.children"
-                :key="c.path"
-                class="nav-item nav-child"
-                :class="{ active: isNavActive(c.path) }"
-                @click="router.push(c.path)"
-              >
-                <el-icon :size="15"><component :is="c.icon" /></el-icon>
-                <span>{{ c.label }}</span>
-              </div>
+          </el-tooltip>
+          <div v-show="groupOpen[item.key] && !sideCollapsed" class="nav-children">
+            <div
+              v-for="c in item.children"
+              :key="c.path"
+              class="nav-item nav-child"
+              :class="{ active: isNavActive(c.path) }"
+              @click="router.push(c.path)"
+            >
+              <el-icon :size="15"><component :is="c.icon" /></el-icon>
+              <span>{{ c.label }}</span>
             </div>
-          </template>
+          </div>
+        </template>
+        <el-tooltip v-else :content="item.label" placement="right" :disabled="!sideCollapsed">
           <div
-            v-else
             class="nav-item"
             :class="{ active: isNavActive(item.path) }"
             @click="router.push(item.path)"
           >
             <el-icon :size="16"><component :is="item.icon" /></el-icon>
-            <span>{{ item.label }}</span>
+            <span v-show="!sideCollapsed">{{ item.label }}</span>
           </div>
-        </template>
-        </nav>
+        </el-tooltip>
       </template>
+      </nav>
 
-      <!-- 用户行：头像姓名（下拉：个人中心/同步App/退出）+ 通知 + 明暗 + 设置(admin) -->
-      <div class="user-row">
+      <!-- 用户行：头像姓名（下拉：个人中心/同步App/退出）+ 通知 + 明暗 + 系统管理(admin)；收起时压缩为头像 -->
+      <div class="user-row" :class="{ 'user-row-collapsed': sideCollapsed }">
         <el-dropdown trigger="click" @command="handleCommand">
           <span class="user-info">
             <el-icon><Avatar /></el-icon>
-            <span class="user-name">{{ authStore.user?.name || authStore.user?.username || '用户' }}</span>
+            <span v-show="!sideCollapsed" class="user-name">{{ authStore.user?.name || authStore.user?.username || '用户' }}</span>
           </span>
           <template #dropdown>
             <el-dropdown-menu>
@@ -108,7 +107,7 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <div class="user-actions">
+        <div v-show="!sideCollapsed" class="user-actions">
           <!-- 通知铃铛 -->
           <el-popover placement="top-end" :width="360" trigger="click" @show="loadNotifications">
             <template #reference>
@@ -142,12 +141,25 @@
               <Moon v-else />
             </el-icon>
           </el-tooltip>
-          <!-- 系统设置入口（仅 admin） -->
-          <el-tooltip v-if="isAdmin" content="系统设置" placement="top">
-            <el-icon :size="17" class="icon-btn" @click="router.push('/admin/system')">
-              <Setting />
-            </el-icon>
-          </el-tooltip>
+          <!-- 系统管理入口（仅 admin）：弹出菜单按「用户权限 / AI 模型 / 系统运维」分组直达各管理页 -->
+          <el-popover v-if="isAdmin" ref="adminMenuRef" placement="top-end" :width="216" trigger="click">
+            <template #reference>
+              <el-icon :size="17" class="icon-btn" title="系统管理"><Setting /></el-icon>
+            </template>
+            <div v-for="g in adminGroups" :key="g.key" class="admin-menu-group">
+              <div class="admin-menu-label">{{ g.label }}</div>
+              <div
+                v-for="m in g.items"
+                :key="m.path"
+                class="admin-menu-item"
+                :class="{ active: isNavActive(m.path) }"
+                @click="goAdmin(m.path)"
+              >
+                <el-icon :size="15"><component :is="m.icon" /></el-icon>
+                <span>{{ m.label }}</span>
+              </div>
+            </div>
+          </el-popover>
         </div>
       </div>
     </el-aside>
@@ -197,6 +209,16 @@
           title="沙箱环境：当前数据用于试用验证，正式上线前将清空"
           style="margin-bottom: 16px"
         />
+        <!-- 管理页轻量面包屑：标明当前位置（侧栏保持常规导航，点任意项即可离开） -->
+        <div v-if="adminCrumb" class="admin-crumb">
+          <span>系统管理</span>
+          <el-icon :size="12" class="admin-crumb-sep"><ArrowRight /></el-icon>
+          <span>{{ adminCrumb.group }}</span>
+          <template v-if="adminCrumb.label">
+            <el-icon :size="12" class="admin-crumb-sep"><ArrowRight /></el-icon>
+            <span class="admin-crumb-cur">{{ adminCrumb.label }}</span>
+          </template>
+        </div>
         <router-view />
       </el-main>
     </el-container>
@@ -263,7 +285,7 @@ import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   User, UserFilled, List, SetUp, Collection, Avatar, ArrowDown, Bell, Notebook,
-  Sunny, Moon, Files, MoreFilled, ArrowRight, Plus, Search,
+  Sunny, Moon, Files, MoreFilled, ArrowRight, Plus, Search, Fold, Expand,
   Setting, Cpu, DataAnalysis, Monitor, WarningFilled, Delete, Tickets, MagicStick, Connection,
   Stamp, Back,
 } from '@element-plus/icons-vue'
@@ -313,7 +335,7 @@ function toggleGroup(key) {
   groupOpen[key] = !groupOpen[key]
 }
 
-// 系统管理菜单（仅 admin），按职能分组聚合；admin 处于 /admin 路由时替换侧栏工作区列表
+// 系统管理菜单（仅 admin），按职能分组聚合；经侧栏齿轮的弹出菜单进入，移动端在「更多」面板平铺
 const isAdmin = computed(() => authStore.user?.role === 'admin')
 const adminGroups = [
   {
@@ -347,7 +369,42 @@ const adminGroups = [
   },
 ]
 const adminPaths = adminGroups.flatMap((g) => g.items.map((m) => m.path))
+// admin 处于 /admin 路由（移动端顶栏据此显示返回箭头；桌面端侧栏不再切换为管理菜单）
 const showAdminMenu = computed(() => isAdmin.value && route.path.startsWith('/admin'))
+
+// 管理页面包屑（系统管理 / 分组 / 页面），未匹配到具体页时只到分组级
+const adminCrumb = computed(() => {
+  if (!showAdminMenu.value) return null
+  for (const g of adminGroups) {
+    const m = g.items.find((i) => isNavActive(i.path))
+    if (m) return { group: g.label, label: m.label }
+  }
+  return { group: '', label: '' }
+})
+
+// 齿轮弹出菜单跳转后收起菜单
+const adminMenuRef = ref(null)
+function goAdmin(path) {
+  adminMenuRef.value?.hide()
+  router.push(path)
+}
+
+// ========== 侧栏收起 / 悬停展开 ==========
+// collapsed 持久化到 localStorage；收起状态下鼠标悬停侧栏临时展开（hoverExpanded），移开恢复
+const collapsed = ref(localStorage.getItem('sidebarCollapsed') === '1')
+const hoverExpanded = ref(false)
+const sideCollapsed = computed(() => collapsed.value && !hoverExpanded.value)
+function toggleCollapse() {
+  collapsed.value = !collapsed.value
+  hoverExpanded.value = false
+  localStorage.setItem('sidebarCollapsed', collapsed.value ? '1' : '0')
+}
+function onAsideEnter() {
+  if (collapsed.value) hoverExpanded.value = true
+}
+function onAsideLeave() {
+  hoverExpanded.value = false
+}
 
 // 从系统管理返回工作台：/studio 会自动恢复最近打开的工作区（studio store 记 LAST_NB_KEY）
 function goBackFromAdmin() {
@@ -638,26 +695,104 @@ onUnmounted(() => {
   padding: 1px 5px;
 }
 
-/* 管理菜单顶部的返回按钮：主色实心，与工作区列表区分明显 */
-.btn-back {
+/* 侧栏宽度切换过渡（收起 64px ↔ 展开 240px，含悬停临时展开） */
+.aside {
+  transition: width 0.2s ease;
+}
+/* 收起态：品牌行纵向堆叠（logo 上、展开按钮下） */
+.aside-collapsed .brand {
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 8px 8px;
+}
+.collapse-btn {
+  flex: none;
+  margin-left: auto;
+  cursor: pointer;
+  color: var(--app-ink-3);
+  transition: color 0.15s ease;
+}
+.collapse-btn:hover {
+  color: var(--el-color-primary);
+}
+.aside-collapsed .collapse-btn {
+  margin-left: 0;
+}
+/* 收起态：主操作按钮居中为纯图标 */
+.aside-collapsed .side-actions {
+  padding: 4px 8px 8px;
+}
+.aside-collapsed .btn-new-task,
+.aside-collapsed .btn-search {
+  justify-content: center;
+  padding: 8px 0;
+}
+/* 收起态：导航项居中为纯图标，分隔线/滚动区留白收窄 */
+.aside-collapsed .side-scroll {
+  padding: 2px 8px;
+}
+.aside-collapsed .side-divider {
+  margin: 6px 8px;
+}
+.aside-collapsed .side-nav {
+  padding: 4px 8px 6px;
+}
+.aside-collapsed .nav-item {
+  justify-content: center;
+  padding: 8px 0;
+}
+/* 收起态：用户行压缩为头像居中 */
+.user-row-collapsed {
+  justify-content: center;
+  padding: 10px 8px;
+}
+
+/* ========== 系统管理弹出菜单（侧栏齿轮） ========== */
+.admin-menu-group + .admin-menu-group {
+  margin-top: 8px;
+  border-top: 1px solid var(--app-line);
+  padding-top: 8px;
+}
+.admin-menu-label {
+  font-size: 12px;
+  color: var(--app-ink-3);
+  padding: 2px 10px 4px;
+}
+.admin-menu-item {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
-  width: 100%;
-  margin: 4px 0 10px;
-  padding: 8px 0;
-  border: none;
+  gap: 8px;
+  padding: 7px 10px;
   border-radius: 8px;
-  background: var(--el-color-primary);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s ease;
+  font-size: 13px;
+  color: var(--app-ink-2);
+  transition: background 0.15s ease, color 0.15s ease;
 }
-.btn-back:hover {
-  background: var(--el-color-primary-dark-2);
+.admin-menu-item:hover {
+  background: var(--sidebar-hover);
+  color: var(--app-ink);
+}
+.admin-menu-item.active {
+  color: var(--el-color-primary);
+  font-weight: 600;
+}
+
+/* ========== 管理页面包屑（内容区顶部，轻量位置提示） ========== */
+.admin-crumb {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--app-ink-3);
+  margin: -8px 0 12px;
+}
+.admin-crumb-sep {
+  color: var(--app-ink-3);
+}
+.admin-crumb-cur {
+  color: var(--app-ink);
+  font-weight: 600;
 }
 
 /* 移动端顶栏返回箭头 */
@@ -667,16 +802,13 @@ onUnmounted(() => {
   flex: none;
 }
 
-/* 中部滚动区：工作区列表 / 管理菜单 */
+/* 中部滚动区：工作区列表 */
 .side-scroll {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 2px 12px;
   min-height: 0;
-}
-.side-group {
-  margin-bottom: 8px;
 }
 .side-group-label {
   font-size: 12px;

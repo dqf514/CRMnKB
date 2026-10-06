@@ -188,14 +188,29 @@
         </div>
       </div>
 
-      <div v-if="!isMobile" class="col col-right">
-        <div class="col-tabs">
-          <button :class="{ active: studio.activeTab === 'notes' }" @click="studio.activeTab = 'notes'">笔记</button>
-          <button :class="{ active: studio.activeTab === 'reports' }" @click="studio.activeTab = 'reports'">报告</button>
+      <!-- 桌面端右栏：可拖拽调宽（320~640px，宽度 localStorage 持久化）+ 可收起为边缘细条 -->
+      <template v-if="!isMobile">
+        <div v-if="rightCollapsed" class="col-expand" title="展开笔记 / 报告" @click="toggleRight">
+          <el-icon :size="14"><DArrowLeft /></el-icon>
+          <span class="col-expand-text">笔记 / 报告</span>
         </div>
-        <NotesPanel v-show="studio.activeTab === 'notes'" />
-        <ReportsPanel v-if="studio.activeTab === 'reports'" ref="reportsPanelRef" />
-      </div>
+        <template v-else>
+          <div class="col-resizer" @mousedown="startResize" />
+          <div class="col col-right" :style="{ width: rightWidth + 'px' }">
+            <div class="col-tabs">
+              <button :class="{ active: studio.activeTab === 'notes' }" @click="studio.activeTab = 'notes'">笔记</button>
+              <button :class="{ active: studio.activeTab === 'reports' }" @click="studio.activeTab = 'reports'">报告</button>
+              <el-tooltip content="收起" placement="left">
+                <button class="col-collapse-btn" @click="toggleRight">
+                  <el-icon :size="14"><DArrowRight /></el-icon>
+                </button>
+              </el-tooltip>
+            </div>
+            <NotesPanel v-show="studio.activeTab === 'notes'" />
+            <ReportsPanel v-if="studio.activeTab === 'reports'" ref="reportsPanelRef" />
+          </div>
+        </template>
+      </template>
     </div>
 
     <!-- 来源选择抽屉（仅移动端；桌面端用输入区旁的 popover；Agent 模式下面板整体禁用遮罩） -->
@@ -226,6 +241,7 @@ import {
   Notebook, Plus, Refresh,
   Search, Link, Folder, MagicStick, Collection, Cpu, Files,
   CircleCheck, CircleClose, VideoPause, Promotion, Paperclip,
+  DArrowLeft, DArrowRight,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useStudioStore } from '../stores/studio'
@@ -325,6 +341,38 @@ const isMobile = ref(window.innerWidth < 992)
 const sourcesDrawer = ref(false)
 const sourcesPopover = ref(false)
 const sideDrawer = ref(false)
+
+// 右栏宽度/收起状态：localStorage 持久化；拖拽分隔条在 320~640px 之间调宽
+const RIGHT_MIN = 320
+const RIGHT_MAX = 640
+const clampRightWidth = (w) => Math.min(RIGHT_MAX, Math.max(RIGHT_MIN, w))
+const rightWidth = ref(clampRightWidth(Number(localStorage.getItem('studioRightWidth')) || 420))
+const rightCollapsed = ref(localStorage.getItem('studioRightCollapsed') === '1')
+function toggleRight() {
+  rightCollapsed.value = !rightCollapsed.value
+  localStorage.setItem('studioRightCollapsed', rightCollapsed.value ? '1' : '0')
+}
+function startResize(e) {
+  e.preventDefault()
+  const startX = e.clientX
+  const startW = rightWidth.value
+  const onMove = (ev) => {
+    // 分隔条在中列右侧：鼠标左移变宽、右移变窄
+    rightWidth.value = clampRightWidth(startW + (startX - ev.clientX))
+  }
+  const onUp = () => {
+    window.removeEventListener('mousemove', onMove)
+    window.removeEventListener('mouseup', onUp)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+    localStorage.setItem('studioRightWidth', String(rightWidth.value))
+  }
+  // 拖拽期间锁定光标并禁止选中文本，避免划过消息区时体验断裂
+  document.body.style.cursor = 'col-resize'
+  document.body.style.userSelect = 'none'
+  window.addEventListener('mousemove', onMove)
+  window.addEventListener('mouseup', onUp)
+}
 // 附件快速上传：文档库默认目录（不传 folder_id），上传后直接关联本工作区并纳入对话范围
 const attachInput = ref(null)
 const attachDirInput = ref(null)
@@ -575,10 +623,56 @@ watch(
   border-radius: var(--app-radius) 0 0 var(--app-radius);
 }
 .col-right {
-  width: 360px;
+  /* 宽度由 :style 绑定（rightWidth ref，默认 420px，可拖拽 320~640px） */
   flex-shrink: 0;
   background: var(--studio-side-bg);
   border-left: 1px solid var(--app-line);
+}
+/* 中列与右栏之间的拖拽分隔条 */
+.col-resizer {
+  width: 5px;
+  flex: none;
+  cursor: col-resize;
+  transition: background 0.15s ease;
+}
+.col-resizer:hover {
+  background: var(--el-color-primary-light-5);
+}
+/* 右栏收起后的边缘展开条（竖排文字，点击展开） */
+.col-expand {
+  width: 26px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  cursor: pointer;
+  background: var(--studio-side-bg);
+  border-left: 1px solid var(--app-line);
+  color: var(--app-ink-2);
+  transition: color 0.15s ease;
+}
+.col-expand:hover {
+  color: var(--el-color-primary);
+}
+.col-expand-text {
+  writing-mode: vertical-rl;
+  font-size: 12px;
+  letter-spacing: 2px;
+}
+/* col-tabs 右侧的收起按钮（覆盖 .col-tabs button 的 flex:1） */
+.col-tabs .col-collapse-btn {
+  flex: none;
+  width: 32px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--app-ink-3);
+  border-bottom: 2px solid transparent;
+}
+.col-tabs .col-collapse-btn:hover {
+  color: var(--el-color-primary);
 }
 .col-tabs {
   display: flex;

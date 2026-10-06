@@ -3,11 +3,27 @@
     <!-- ========== 简历式客户头部 ========== -->
     <div v-if="customer" class="head-card">
       <div class="head-main">
-        <el-tooltip content="返回列表" placement="bottom">
-          <button class="back-btn" @click="router.push('/customers')">
-            <el-icon><ArrowLeft /></el-icon>
-          </button>
-        </el-tooltip>
+        <div class="head-left">
+          <el-tooltip content="返回列表" placement="bottom">
+            <button class="back-btn" @click="router.push('/customers')">
+              <el-icon><ArrowLeft /></el-icon>
+            </button>
+          </el-tooltip>
+          <!-- 上一个/下一个：仅当从列表带浏览序列进入时显示（直接 URL 进入无序列则隐藏） -->
+          <div v-if="hasNav" class="nav-switch">
+            <el-tooltip content="上一个" placement="bottom">
+              <button class="back-btn" :disabled="navIdx <= 0" @click="goNav(-1)">
+                <el-icon><ArrowLeft /></el-icon>
+              </button>
+            </el-tooltip>
+            <span class="nav-pos">{{ navIdx + 1 }} / {{ navIds.length }}</span>
+            <el-tooltip content="下一个" placement="bottom">
+              <button class="back-btn" :disabled="navIdx >= navIds.length - 1" @click="goNav(1)">
+                <el-icon><ArrowRight /></el-icon>
+              </button>
+            </el-tooltip>
+          </div>
+        </div>
         <div class="avatar">{{ customer.name?.slice(0, 1) }}</div>
         <div class="head-id">
           <div class="name-row">
@@ -385,10 +401,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  ArrowLeft, Plus, Upload, UploadFilled, Loading, Refresh, Message, Edit, Delete,
+  ArrowLeft, ArrowRight, Plus, Upload, UploadFilled, Loading, Refresh, Message, Edit, Delete,
   Phone, ChatDotRound, Location, Link, Present, Clock,
 } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -414,6 +430,7 @@ import {
   enumLabel, enumTagType, formatDate, formatDateTime, formatFileSize, formatMoney,
 } from '../utils/format'
 import { useDocCategoryStore } from '../stores/docCategories'
+import { loadCustomerNav } from '../utils/customerNav'
 
 // 资料类型列表（后端配置，管理端可增删改）
 const docCategoryStore = useDocCategoryStore()
@@ -422,6 +439,16 @@ const route = useRoute()
 const router = useRouter()
 // 用 let 以便路由 id 变化时更新（同一路由不同 id 跳转时组件被复用）
 let customerId = route.params.id
+
+// 列表带来的浏览序列（sessionStorage）：上一个/下一个按序列 push 切换，
+// 路由 id watch 会自动重新加载；直接 URL 进入无序列时隐藏切换按钮
+const navIds = ref(loadCustomerNav()?.ids || [])
+const navIdx = computed(() => navIds.value.findIndex((i) => String(i) === String(route.params.id)))
+const hasNav = computed(() => navIds.value.length > 1 && navIdx.value >= 0)
+function goNav(delta) {
+  const target = navIds.value[navIdx.value + delta]
+  if (target != null) router.push(`/customers/${target}`)
+}
 
 const loading = ref(false)
 const customer = ref(null)
@@ -907,6 +934,35 @@ onUnmounted(() => {
 .back-btn:hover {
   color: var(--el-color-primary);
   border-color: var(--el-color-primary-light-5);
+}
+.back-btn:disabled {
+  color: var(--app-ink-3);
+  cursor: not-allowed;
+  border-color: var(--app-line);
+}
+/* 头部左侧列：返回按钮 + 上一个/下一个切换组 */
+.head-left {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.nav-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav-switch .back-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+.nav-pos {
+  font-size: 12px;
+  color: var(--app-ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .avatar {
   flex: none;
