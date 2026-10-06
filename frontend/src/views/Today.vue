@@ -87,8 +87,49 @@
         </div>
       </section>
 
-      <!-- 右栏：团队今日动态 + 底部今日新增计数 -->
-      <section class="col-feed rise d2">
+      <!-- 右栏：迷你日历（上）+ 团队今日动态（下），一屏内看完 -->
+      <section class="col-right rise d2">
+        <div class="cal-head">
+          <span class="cal-title">日历</span>
+          <span class="cal-month-label">{{ calMonthLabel }}</span>
+          <div class="cal-actions">
+            <el-button-group>
+              <el-button size="small" :icon="ArrowLeft" aria-label="上一月" @click="shiftMonth(-1)" />
+              <el-button size="small" @click="goToday">今天</el-button>
+              <el-button size="small" :icon="ArrowRight" aria-label="下一月" @click="shiftMonth(1)" />
+            </el-button-group>
+            <el-tooltip content="订阅日历（ICS，可同步到 Outlook / Google / iPhone）" placement="bottom">
+              <el-button size="small" :icon="Link" aria-label="订阅日历" @click="openSubscribe" />
+            </el-tooltip>
+          </div>
+        </div>
+        <div class="cal-weekdays">
+          <span v-for="w in WEEKDAYS" :key="w">{{ w }}</span>
+        </div>
+        <div v-loading="calLoading" class="cal-grid">
+          <div
+            v-for="cell in calCells"
+            :key="cell.key"
+            class="cal-cell"
+            :class="{ dim: !cell.inMonth, today: cell.isToday }"
+            @click="openDay(cell)"
+          >
+            <div class="cal-cell-num">{{ cell.day }}</div>
+            <div class="cal-cell-events">
+              <div
+                v-for="ev in cell.events.slice(0, 2)"
+                :key="ev.id"
+                class="cal-ev"
+                :class="[`cal-ev-${ev.type}`, { done: ev.done }]"
+              >
+                <span class="cal-ev-dot"></span>
+                <span class="cal-ev-text">{{ ev.title }}</span>
+              </div>
+              <div v-if="cell.events.length > 2" class="cal-ev-more">+{{ cell.events.length - 2 }}</div>
+            </div>
+          </div>
+        </div>
+
         <div class="feed-title">团队今日动态</div>
         <div v-if="overview.activity?.length" class="activity-list">
           <div v-for="(a, i) in overview.activity" :key="i" class="activity-row">
@@ -109,48 +150,6 @@
       <p>今日数据加载失败，请检查网络后重试</p>
       <el-button type="primary" @click="load">重试</el-button>
     </div>
-
-    <!-- 日历区块：月历聚合任务到期 / 商机节点 / 客户生日，数据独立于首屏概览加载 -->
-    <section v-if="!loadError" class="cal-block rise d2">
-      <div class="cal-head">
-        <span class="cal-title">日历</span>
-        <span class="cal-month-label">{{ calMonthLabel }}</span>
-        <div class="cal-actions">
-          <el-button-group>
-            <el-button size="small" :icon="ArrowLeft" aria-label="上一月" @click="shiftMonth(-1)" />
-            <el-button size="small" @click="goToday">今天</el-button>
-            <el-button size="small" :icon="ArrowRight" aria-label="下一月" @click="shiftMonth(1)" />
-          </el-button-group>
-          <el-button size="small" :icon="Link" @click="openSubscribe">订阅日历</el-button>
-        </div>
-      </div>
-      <div class="cal-weekdays">
-        <span v-for="w in WEEKDAYS" :key="w">{{ w }}</span>
-      </div>
-      <div v-loading="calLoading" class="cal-grid">
-        <div
-          v-for="cell in calCells"
-          :key="cell.key"
-          class="cal-cell"
-          :class="{ dim: !cell.inMonth, today: cell.isToday }"
-          @click="openDay(cell)"
-        >
-          <div class="cal-cell-num">{{ cell.day }}</div>
-          <div class="cal-cell-events">
-            <div
-              v-for="ev in cell.events.slice(0, 3)"
-              :key="ev.id"
-              class="cal-ev"
-              :class="[`cal-ev-${ev.type}`, { done: ev.done }]"
-            >
-              <span class="cal-ev-dot"></span>
-              <span class="cal-ev-text">{{ ev.title }}</span>
-            </div>
-            <div v-if="cell.events.length > 3" class="cal-ev-more">+{{ cell.events.length - 3 }}</div>
-          </div>
-        </div>
-      </div>
-    </section>
 
     <!-- 某日事件清单弹窗 -->
     <el-dialog v-model="dayDialog" :title="dayDialogTitle" width="min(92vw, 420px)">
@@ -453,18 +452,21 @@ onMounted(() => {
 
 <style scoped>
 .today-page {
-  max-width: 1200px;
-  margin: 0 auto;
+  /* 与其他页面一致铺满内容区；桌面端控制在一屏内（列表内部滚动，页面不滚） */
+  height: calc(100vh - var(--app-header-h) - 40px);
+  display: flex;
+  flex-direction: column;
 }
-/* 三栏：台历 / 主栏 / 动态，栏间 1px 竖分割线 */
+/* 三栏：台历 / 主栏 / 右栏（迷你日历+动态），栏间 1px 竖分割线 */
 .today-grid {
+  flex: 1;
+  min-height: 0;
   display: flex;
   align-items: stretch;
   background: var(--app-surface);
   border: 1px solid var(--app-line);
   border-radius: var(--app-radius-lg);
   box-shadow: var(--app-shadow);
-  min-height: calc(100vh - var(--app-header-h) - 40px);
 }
 .col-cal {
   flex: none;
@@ -501,6 +503,13 @@ onMounted(() => {
   min-width: 0;
   padding: 24px 28px;
   border-right: 1px solid var(--app-line);
+  display: flex;
+  flex-direction: column;
+}
+.main-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .capture-row {
   display: flex;
@@ -627,21 +636,26 @@ onMounted(() => {
   color: var(--app-ink-2);
   font-size: 14px;
 }
-.col-feed {
+.col-right {
   flex: none;
-  width: 320px;
-  padding: 24px 20px;
+  width: 400px;
+  padding: 16px 16px 14px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
 }
 .feed-title {
   font-size: 14px;
   font-weight: 600;
   color: var(--app-ink);
-  margin-bottom: 6px;
+  margin: 14px 0 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--app-line);
 }
 .activity-list {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .activity-row {
   cursor: default;
@@ -686,28 +700,20 @@ onMounted(() => {
   color: var(--app-ink);
 }
 
-/* ========== 月历区块 ========== */
-.cal-block {
-  margin-top: 16px;
-  background: var(--app-surface);
-  border: 1px solid var(--app-line);
-  border-radius: var(--app-radius-lg);
-  box-shadow: var(--app-shadow);
-  padding: 16px 20px 12px;
-}
+/* ========== 迷你月历（右栏上部） ========== */
 .cal-head {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-bottom: 10px;
+  gap: 10px;
+  margin-bottom: 8px;
 }
 .cal-title {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--app-ink);
 }
 .cal-month-label {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--app-ink-2);
   font-variant-numeric: tabular-nums;
 }
@@ -715,7 +721,7 @@ onMounted(() => {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
 }
 .cal-weekdays {
   display: grid;
@@ -731,11 +737,10 @@ onMounted(() => {
   grid-template-columns: repeat(7, 1fr);
   border-left: 1px solid var(--app-line);
   border-top: 1px solid var(--app-line);
-  min-height: 200px;
 }
 .cal-cell {
-  min-height: 88px;
-  padding: 4px 6px;
+  min-height: 54px;
+  padding: 3px 4px;
   border-right: 1px solid var(--app-line);
   border-bottom: 1px solid var(--app-line);
   cursor: pointer;
@@ -886,8 +891,11 @@ onMounted(() => {
   .rise { animation: none; opacity: 1; }
 }
 
-/* 移动端：纵向堆叠，台历块变横条（日期问候一行） */
+/* 移动端：纵向堆叠（恢复页面滚动），台历块变横条（日期问候一行） */
 @media (max-width: 991px) {
+  .today-page {
+    height: auto;
+  }
   .today-grid {
     flex-direction: column;
     min-height: 0;
@@ -923,14 +931,11 @@ onMounted(() => {
     border-right: none;
     border-bottom: 1px solid var(--app-line);
   }
-  .col-feed {
+  .col-right {
     width: auto;
     padding: 16px;
   }
   /* 月历移动端：格子缩小，事件只留色点 */
-  .cal-block {
-    padding: 12px;
-  }
   .cal-head {
     flex-wrap: wrap;
     gap: 8px;
