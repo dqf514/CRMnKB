@@ -119,7 +119,7 @@ async function handleLogin() {
     await authStore.login(form)
     themeStore.syncFromServer()
     ElMessage.success('登录成功')
-    router.push('/studio')  // 登录后进入工作台
+    router.push('/today')  // 登录后进入今日门户（系统默认落地页）
   } catch {
     /* 拦截器已提示 */
   } finally {
@@ -179,7 +179,7 @@ async function handlePhoneLogin() {
     await authStore.loginByPhone(phoneForm)
     themeStore.syncFromServer()
     ElMessage.success('登录成功')
-    router.push('/studio')
+    router.push('/today')
   } catch {
     /* 拦截器已提示 */
   } finally {

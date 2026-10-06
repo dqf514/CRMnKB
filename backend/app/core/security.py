@@ -14,6 +14,9 @@ MCP_TOKEN_AUDIENCE = "dsh-mcp"
 # 文件访问令牌的类型声明：仅允许 ?t= 文件直链，不能当登录令牌用
 FILE_TOKEN_TYPE = "file"
 
+# ICS 日历订阅令牌的类型声明：仅允许 /calendar/feed.ics 订阅链接，不能当登录令牌用
+ICS_TOKEN_TYPE = "ics"
+
 _password_hash = PasswordHash((BcryptHasher(),))
 
 
@@ -44,6 +47,18 @@ def create_file_token(file_id: int, user_id: int) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(seconds=300)
     payload = {"sub": str(user_id), "file": file_id, "typ": FILE_TOKEN_TYPE, "iat": now, "exp": expire}
+    return jwt.encode(payload, settings.JWT_SECRET, algorithm=ALGORITHM)
+
+
+def create_ics_token(user_id: int, days: int = 180) -> str:
+    """ICS 日历订阅令牌（默认 180 天）：放在订阅 URL（?token=）里给系统日历客户端用。
+
+    日历客户端订阅不能携带 Authorization 头，只能用 URL 令牌；typ=ics 声明使其
+    无法升格为登录 JWT——通用 Bearer 鉴权（api/deps.py）拒绝一切带 typ 的令牌。
+    """
+    now = datetime.now(timezone.utc)
+    expire = now + timedelta(days=days)
+    payload = {"sub": str(user_id), "typ": ICS_TOKEN_TYPE, "iat": now, "exp": expire}
     return jwt.encode(payload, settings.JWT_SECRET, algorithm=ALGORITHM)
 
 

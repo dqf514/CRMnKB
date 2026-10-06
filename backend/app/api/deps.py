@@ -25,10 +25,15 @@ async def _user_from_token(
     # dsh MCP 专用令牌（aud=dsh-mcp）只允许访问 /api/mcp，不能当登录令牌用
     if payload.get("aud") == MCP_TOKEN_AUDIENCE:
         raise HTTPException(status_code=401, detail="该令牌仅限知识库 MCP 接口使用")
-    # 文件访问令牌（typ=file）只允许 ?t= 文件直链，不能当登录令牌用
-    # （get_current_user_with_query_token 在已校验 file 声明后放行）
-    if not allow_file_token and payload.get("typ") == FILE_TOKEN_TYPE:
-        raise HTTPException(status_code=401, detail="该令牌仅限文件直链访问使用")
+    # 带专用用途声明（typ）的令牌一律不能当登录令牌用：typ=file 仅 ?t= 文件直链
+    # （get_current_user_with_query_token 校验 file 声明后以 allow_file_token 放行），
+    # typ=ics 仅日历订阅源 /calendar/feed.ics 的 ?token= 参数。
+    typ = payload.get("typ")
+    if typ == FILE_TOKEN_TYPE:
+        if not allow_file_token:
+            raise HTTPException(status_code=401, detail="该令牌仅限文件直链访问使用")
+    elif typ is not None:
+        raise HTTPException(status_code=401, detail="该令牌仅限专用接口使用")
     user = await db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")

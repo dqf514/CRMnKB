@@ -20,6 +20,7 @@ from app.api import (
     agent_approvals,
     auth,
     brand,
+    calendar,
     chat,
     customers,
     dashboard,
@@ -223,6 +224,7 @@ app.add_middleware(ObservabilityMiddleware)
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(agent_approvals.router, prefix="/api/v1")
 app.include_router(brand.router, prefix="/api/v1")
+app.include_router(calendar.router, prefix="/api/v1")
 app.include_router(customers.router, prefix="/api/v1")
 app.include_router(industries.router, prefix="/api/v1")
 app.include_router(followups.router, prefix="/api/v1")

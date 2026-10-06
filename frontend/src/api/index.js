@@ -187,6 +187,11 @@ export const getDailyReport = (params) => request.get('/api/v1/dashboard/daily-r
 export const quickCapture = (data) => request.post('/api/v1/dashboard/capture', data)
 export const globalSearch = (q) => request.get('/api/v1/search/global', { params: { q } })
 
+// ========== 日历（任务/商机/客户生日聚合 + ICS 订阅） ==========
+// start/end 为 YYYY-MM-DD（服务器本地日期口径，由前端按本地时区生成）
+export const getCalendarEvents = (params) => request.get('/api/v1/calendar/events', { params })
+export const getCalendarFeedToken = () => request.get('/api/v1/calendar/feed-token')
+
 // ========== 工作流 ==========
 export const getWorkflows = () => request.get('/api/v1/workflows')
 export const createWorkflow = (data) => request.post('/api/v1/workflows', data)

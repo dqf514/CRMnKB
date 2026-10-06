@@ -110,6 +110,78 @@
       <el-button type="primary" @click="load">重试</el-button>
     </div>
 
+    <!-- 日历区块：月历聚合任务到期 / 商机节点 / 客户生日，数据独立于首屏概览加载 -->
+    <section v-if="!loadError" class="cal-block rise d2">
+      <div class="cal-head">
+        <span class="cal-title">日历</span>
+        <span class="cal-month-label">{{ calMonthLabel }}</span>
+        <div class="cal-actions">
+          <el-button-group>
+            <el-button size="small" :icon="ArrowLeft" aria-label="上一月" @click="shiftMonth(-1)" />
+            <el-button size="small" @click="goToday">今天</el-button>
+            <el-button size="small" :icon="ArrowRight" aria-label="下一月" @click="shiftMonth(1)" />
+          </el-button-group>
+          <el-button size="small" :icon="Link" @click="openSubscribe">订阅日历</el-button>
+        </div>
+      </div>
+      <div class="cal-weekdays">
+        <span v-for="w in WEEKDAYS" :key="w">{{ w }}</span>
+      </div>
+      <div v-loading="calLoading" class="cal-grid">
+        <div
+          v-for="cell in calCells"
+          :key="cell.key"
+          class="cal-cell"
+          :class="{ dim: !cell.inMonth, today: cell.isToday }"
+          @click="openDay(cell)"
+        >
+          <div class="cal-cell-num">{{ cell.day }}</div>
+          <div class="cal-cell-events">
+            <div
+              v-for="ev in cell.events.slice(0, 3)"
+              :key="ev.id"
+              class="cal-ev"
+              :class="[`cal-ev-${ev.type}`, { done: ev.done }]"
+            >
+              <span class="cal-ev-dot"></span>
+              <span class="cal-ev-text">{{ ev.title }}</span>
+            </div>
+            <div v-if="cell.events.length > 3" class="cal-ev-more">+{{ cell.events.length - 3 }}</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 某日事件清单弹窗 -->
+    <el-dialog v-model="dayDialog" :title="dayDialogTitle" width="min(92vw, 420px)">
+      <div v-if="dayEvents.length" class="day-events">
+        <div v-for="ev in dayEvents" :key="ev.id" class="day-ev" @click="goEvent(ev)">
+          <el-tag size="small" :type="evTagType(ev)" effect="light">{{ evTypeLabel(ev) }}</el-tag>
+          <span class="day-ev-title" :class="{ done: ev.done }">{{ ev.title }}</span>
+          <span v-if="ev.customer_name" class="day-ev-co">{{ ev.customer_name }}</span>
+        </div>
+      </div>
+      <el-empty v-else description="当日暂无事件" :image-size="60" />
+    </el-dialog>
+
+    <!-- ICS 订阅弹窗：打开时才请求 token，不在首屏请求 -->
+    <el-dialog v-model="subDialog" title="订阅日历" width="min(92vw, 560px)">
+      <div v-loading="subLoading">
+        <p class="sub-tip">把下面的地址添加到常用日历软件，即可同步任务到期、商机节点与客户生日：</p>
+        <el-input v-model="subUrl" readonly placeholder="订阅地址获取中…">
+          <template #append>
+            <el-button :icon="CopyDocument" :disabled="!subUrl" @click="copySubUrl">复制</el-button>
+          </template>
+        </el-input>
+        <ul class="sub-steps">
+          <li><b>Outlook</b>：日历 → 添加日历 → 订阅自 web，粘贴上面的地址</li>
+          <li><b>Google 日历</b>：其他日历 → 通过网址添加</li>
+          <li><b>iPhone</b>：设置 → 日历 → 账户 → 添加已订阅日历</li>
+        </ul>
+        <p class="sub-note">订阅地址为只读；token 有效期 180 天，到期后回到本页重新获取即可。</p>
+      </div>
+    </el-dialog>
+
     <!-- 日报弹窗 -->
     <el-dialog v-model="reportDialog" :title="`日报 · ${reportData?.date || ''}`" width="min(92vw, 560px)">
       <div v-if="reportData" class="report-body">
@@ -129,13 +201,14 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Document, Paperclip } from '@element-plus/icons-vue'
+import { Document, Paperclip, ArrowLeft, ArrowRight, Link, CopyDocument } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '../stores/auth'
-import { getDashboardToday, quickCapture, getDailyReport } from '../api'
+import { getDashboardToday, quickCapture, getDailyReport, getCalendarEvents, getCalendarFeedToken } from '../api'
 import { uploadLibraryFiles } from '../api/libraryUpload'
 import { ensureUploadFormats, isEnabledExt, enabledAcceptStr } from '../utils/uploadFormats'
 import { formatDateTime, parseServerDate } from '../utils/format'
+import { usePagedFetch } from '../utils/usePagedFetch'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -238,6 +311,127 @@ async function openDailyReport() {
   reportDialog.value = true
 }
 
+// ========== 月历 ==========
+// 事件类型配色/文案：任务蓝、商机橙、生日红；done 任务在格子里划线置灰
+const CAL_TYPE = {
+  task: { label: '任务', tag: 'primary' },
+  opportunity: { label: '商机', tag: 'warning' },
+  birthday: { label: '生日', tag: 'danger' },
+}
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日']
+
+const calCursor = ref(new Date())  // 当前显示月份（只用其年/月）
+const calEvents = ref([])
+// 复用分页防竞态思路：快速切月时丢弃过期响应
+const { loading: calLoading, run: runCalFetch } = usePagedFetch()
+
+const pad2 = (n) => String(n).padStart(2, '0')
+// 后端 date 为服务器本地日期（YYYY-MM-DD），这里按本地时区生成同格式字符串，不做时区换算
+function ymd(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+const calMonthLabel = computed(() => `${calCursor.value.getFullYear()} 年 ${calCursor.value.getMonth() + 1} 月`)
+
+// 6 行 × 7 列固定网格（周一开头），含上/下月露头日期；事件按日期分组挂到格子
+const calCells = computed(() => {
+  const y = calCursor.value.getFullYear()
+  const m = calCursor.value.getMonth()
+  const startOffset = (new Date(y, m, 1).getDay() + 6) % 7  // getDay 周日=0 → 周一开头偏移
+  const gridStart = new Date(y, m, 1 - startOffset)
+  const todayStr = ymd(new Date())
+  const evMap = {}
+  for (const ev of calEvents.value) {
+    if (ev.date) (evMap[ev.date] ||= []).push(ev)
+  }
+  const cells = []
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i)
+    const key = ymd(d)
+    cells.push({ key, day: d.getDate(), inMonth: d.getMonth() === m, isToday: key === todayStr, events: evMap[key] || [] })
+  }
+  return cells
+})
+
+function loadCalendar() {
+  // start/end 取当月首尾各外延一周，覆盖网格里露头的上/下月日期
+  const y = calCursor.value.getFullYear()
+  const m = calCursor.value.getMonth()
+  const start = new Date(y, m, 1)
+  start.setDate(start.getDate() - 7)
+  const end = new Date(y, m + 1, 0)
+  end.setDate(end.getDate() + 7)
+  runCalFetch(
+    () => getCalendarEvents({ start: ymd(start), end: ymd(end) }),
+    (res) => { calEvents.value = res?.events || [] },
+  ).catch(() => { /* 拦截器已提示，日历保持旧数据 */ })
+}
+
+function shiftMonth(n) {
+  calCursor.value = new Date(calCursor.value.getFullYear(), calCursor.value.getMonth() + n, 1)
+  loadCalendar()
+}
+function goToday() {
+  calCursor.value = new Date()
+  loadCalendar()
+}
+
+// 某日事件清单
+const dayDialog = ref(false)
+const dayCell = ref(null)
+const dayEvents = computed(() => dayCell.value?.events || [])
+const dayDialogTitle = computed(() => (dayCell.value ? `${dayCell.value.key} 日程` : ''))
+
+function openDay(cell) {
+  dayCell.value = cell
+  dayDialog.value = true
+}
+function evTypeLabel(ev) {
+  return CAL_TYPE[ev.type]?.label || '事件'
+}
+function evTagType(ev) {
+  return CAL_TYPE[ev.type]?.tag || 'info'
+}
+function goEvent(ev) {
+  dayDialog.value = false
+  if (ev.url) router.push(ev.url)
+}
+
+// ========== ICS 订阅 ==========
+const subDialog = ref(false)
+const subUrl = ref('')
+const subLoading = ref(false)
+
+async function openSubscribe() {
+  subDialog.value = true
+  if (subUrl.value || subLoading.value) return  // 已取过/在取不重复请求
+  subLoading.value = true
+  try {
+    const res = await getCalendarFeedToken()
+    subUrl.value = location.origin + (res?.path || '')
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    subLoading.value = false
+  }
+}
+
+async function copySubUrl() {
+  if (!subUrl.value) return
+  try {
+    await navigator.clipboard.writeText(subUrl.value)
+  } catch {
+    // http 等非安全上下文没有 clipboard API，退回 textarea 选中复制
+    const ta = document.createElement('textarea')
+    ta.value = subUrl.value
+    document.body.appendChild(ta)
+    ta.select()
+    document.execCommand('copy')
+    ta.remove()
+  }
+  ElMessage.success('订阅地址已复制')
+}
+
 async function load() {
   loading.value = true
   loadError.value = false
@@ -251,7 +445,10 @@ async function load() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  load()
+  loadCalendar()
+})
 </script>
 
 <style scoped>
@@ -489,6 +686,191 @@ onMounted(load)
   color: var(--app-ink);
 }
 
+/* ========== 月历区块 ========== */
+.cal-block {
+  margin-top: 16px;
+  background: var(--app-surface);
+  border: 1px solid var(--app-line);
+  border-radius: var(--app-radius-lg);
+  box-shadow: var(--app-shadow);
+  padding: 16px 20px 12px;
+}
+.cal-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+.cal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--app-ink);
+}
+.cal-month-label {
+  font-size: 13px;
+  color: var(--app-ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.cal-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cal-weekdays {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  font-size: 12px;
+  color: var(--app-ink-2);
+  text-align: center;
+  padding: 4px 0;
+  border-top: 1px solid var(--app-line);
+}
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  border-left: 1px solid var(--app-line);
+  border-top: 1px solid var(--app-line);
+  min-height: 200px;
+}
+.cal-cell {
+  min-height: 88px;
+  padding: 4px 6px;
+  border-right: 1px solid var(--app-line);
+  border-bottom: 1px solid var(--app-line);
+  cursor: pointer;
+  overflow: hidden;
+}
+.cal-cell:hover {
+  background: var(--app-bg);
+}
+.cal-cell.dim .cal-cell-num {
+  color: var(--app-ink-2);
+  opacity: 0.5;
+}
+.cal-cell.today .cal-cell-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--el-color-primary);
+  color: #fff;
+}
+.cal-cell-num {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  color: var(--app-ink);
+}
+.cal-cell-events {
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cal-ev {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  line-height: 18px;
+  border-radius: 4px;
+  padding: 0 4px;
+  min-width: 0;
+}
+.cal-ev-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.cal-ev-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cal-ev-task {
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+}
+.cal-ev-task .cal-ev-dot { background: var(--el-color-primary); }
+.cal-ev-opportunity {
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+}
+.cal-ev-opportunity .cal-ev-dot { background: var(--el-color-warning); }
+.cal-ev-birthday {
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+}
+.cal-ev-birthday .cal-ev-dot { background: var(--el-color-danger); }
+.cal-ev.done {
+  opacity: 0.55;
+}
+.cal-ev.done .cal-ev-text {
+  text-decoration: line-through;
+}
+.cal-ev-more {
+  font-size: 11px;
+  color: var(--app-ink-2);
+  padding-left: 4px;
+}
+/* 某日事件清单 */
+.day-ev {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 4px;
+  border-bottom: 1px solid var(--app-line);
+  cursor: pointer;
+  font-size: 13px;
+}
+.day-ev:hover {
+  background: var(--app-bg);
+}
+.day-ev-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.day-ev-title.done {
+  text-decoration: line-through;
+  color: var(--app-ink-2);
+}
+.day-ev-co {
+  flex: none;
+  font-size: 12px;
+  color: var(--app-ink-2);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 订阅弹窗 */
+.sub-tip {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--app-ink-2);
+}
+.sub-steps {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--app-ink-2);
+  line-height: 1.9;
+}
+.sub-steps b {
+  color: var(--app-ink);
+}
+.sub-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--app-ink-2);
+}
+
 /* 三栏交错淡入上移（60-100ms 阶梯），reduce 时关闭 */
 .rise {
   opacity: 0;
@@ -544,6 +926,46 @@ onMounted(load)
   .col-feed {
     width: auto;
     padding: 16px;
+  }
+  /* 月历移动端：格子缩小，事件只留色点 */
+  .cal-block {
+    padding: 12px;
+  }
+  .cal-head {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .cal-actions {
+    margin-left: 0;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .cal-cell {
+    min-height: 44px;
+    padding: 2px 3px;
+  }
+  .cal-cell-num {
+    font-size: 12px;
+  }
+  .cal-cell.today .cal-cell-num {
+    width: 18px;
+    height: 18px;
+  }
+  .cal-cell-events {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .cal-ev {
+    padding: 0;
+    background: none;
+    line-height: 1;
+  }
+  .cal-ev-text {
+    display: none;
+  }
+  .cal-ev-more {
+    padding-left: 0;
   }
 }
 </style>
