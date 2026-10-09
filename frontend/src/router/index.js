@@ -8,6 +8,12 @@ const routes = [
     component: () => import('../views/Login.vue'),
   },
   {
+    // 首次引导：手机号注册的新用户补全姓名/密码（需登录，守卫按 preferences.onboarded 强制跳转）
+    path: '/onboarding',
+    name: 'Onboarding',
+    component: () => import('../views/Onboarding.vue'),
+  },
+  {
     // 同步 App「打开网页版」免登：一次性 code 换 token 后跳工作台
     path: '/sso',
     name: 'Sso',
@@ -100,7 +106,13 @@ const routes = [
         path: 'admin/groups',
         name: 'AdminGroups',
         component: () => import('../views/admin/Groups.vue'),
-        meta: { title: '用户分组', admin: true },
+        meta: { title: '团队管理', admin: true },
+      },
+      {
+        path: 'admin/roles',
+        name: 'AdminRoles',
+        component: () => import('../views/admin/Roles.vue'),
+        meta: { title: '角色管理', admin: true },
       },
       {
         path: 'admin/llm/models',
@@ -198,6 +210,11 @@ router.beforeEach((to) => {
   if (token && cachedUser?.must_change_password && to.path !== '/profile') {
     ElMessage.warning('首次登录请先修改初始密码')
     return '/profile'
+  }
+  // 首次引导（手机号注册的新用户）：显式 onboarded === false 才拦截，
+  // 存量用户 preferences 无该 key 不受影响；目标已是 /onboarding 时放行
+  if (token && cachedUser?.preferences && cachedUser.preferences.onboarded === false && to.path !== '/onboarding') {
+    return '/onboarding'
   }
   // 系统管理页仅 admin 可访问
   if (to.matched.some((r) => r.meta?.admin)) {

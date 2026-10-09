@@ -67,7 +67,7 @@ const visible = computed({ get: () => props.modelValue, set: (v) => emit('update
 const teamSubText = computed(() =>
   props.resourceType === 'customer'
     ? '开启后团队所有成员可见并可协作编辑；关闭后仅负责人与被授权成员可见'
-    : '开启后租户内所有用户只读；可再单独给某人提升编辑权限'
+    : '开启后同团队成员只读；可再单独给某人提升编辑权限'
 )
 
 const authStore = useAuthStore()

@@ -5,10 +5,12 @@ import { setActivePinia, createPinia } from 'pinia'
 vi.mock('../src/api/index.js', () => ({
   login: vi.fn(),
   phoneLogin: vi.fn(),
+  register: vi.fn(),
+  onboarding: vi.fn(),
   getMe: vi.fn(),
 }))
 
-import { login as apiLogin, getMe } from '../src/api/index.js'
+import { login as apiLogin, register as apiRegister, onboarding as apiOnboarding, getMe } from '../src/api/index.js'
 import { useAuthStore } from '../src/stores/auth.js'
 
 beforeEach(() => {
@@ -61,5 +63,35 @@ describe('auth store', () => {
     expect(auth.user).toBeNull()
     expect(localStorage.getItem('token')).toBeNull()
     expect(localStorage.getItem('user')).toBeNull()
+  })
+
+  it('注册响应带 user：与登录同样写回 state 与 localStorage', async () => {
+    apiRegister.mockResolvedValueOnce({
+      access_token: 'tk-reg',
+      user: { id: 5, name: '新用户', preferences: { onboarded: false } },
+    })
+    const auth = useAuthStore()
+    await auth.register({ phone: '13800000000', code: '123456' })
+    expect(auth.token).toBe('tk-reg')
+    expect(auth.user.preferences).toEqual({ onboarded: false })
+    expect(localStorage.getItem('token')).toBe('tk-reg')
+  })
+
+  it('onboarding 返回新 token：整体替换旧凭证（设密码后旧 token 失效）', async () => {
+    apiRegister.mockResolvedValueOnce({
+      access_token: 'tk-old',
+      user: { id: 6, preferences: { onboarded: false } },
+    })
+    apiOnboarding.mockResolvedValueOnce({
+      access_token: 'tk-new',
+      user: { id: 6, name: '张三', preferences: { onboarded: true } },
+    })
+    const auth = useAuthStore()
+    await auth.register({ phone: '13800000000', code: '123456' })
+    await auth.completeOnboarding({ name: '张三', password: 'password1' })
+    expect(auth.token).toBe('tk-new')
+    expect(auth.user.preferences).toEqual({ onboarded: true })
+    expect(localStorage.getItem('token')).toBe('tk-new')
+    expect(JSON.parse(localStorage.getItem('user')).preferences).toEqual({ onboarded: true })
   })
 })

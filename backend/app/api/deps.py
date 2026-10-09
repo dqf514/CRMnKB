@@ -95,3 +95,21 @@ async def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="需要管理员权限")
     return user
+
+
+def require_perm(perm_key: str):
+    """按权限点放行（RBAC）：admin 恒真，其余角色查 roles 表（services/roles.py）。
+
+    用法：`Depends(require_perm("user.admin"))`，返回当前用户（与 require_admin 同形）。
+    """
+    from app.services.roles import has_perm  # 延迟导入，避免循环依赖
+
+    async def _checker(
+        user: User = Depends(get_current_user),
+        db: AsyncSession = Depends(get_db),
+    ) -> User:
+        if not await has_perm(db, user, perm_key):
+            raise HTTPException(status_code=403, detail="没有该操作的权限")
+        return user
+
+    return _checker

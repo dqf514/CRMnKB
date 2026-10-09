@@ -3,7 +3,7 @@
 安全边界覆盖：
 - owner 可读（owner 权限）
 - resource_permissions 授权 read / edit
-- 团队可见开关（is_private=False 与存量 NULL 都视为团队可见）
+- 团队共享开关（is_private=False 与存量 NULL 都视为团队共享，仅 owner 同团队成员可见）
 - 文件夹级联继承（祖先授权向下覆盖子文件夹与文件，取链上最高权限）
 - admin 绕过
 - 无权不可见 + 跨租户隔离
@@ -30,10 +30,12 @@ from app.models.notebook import Notebook
 from app.models.resource_permission import ResourcePermission
 from app.models.tenant import Tenant
 from app.models.user import User
+from app.models.user_group import UserGroup
 from app.services import permissions as perms
 
 _TABLES = [
     Tenant.__table__,
+    UserGroup.__table__,
     User.__table__,
     LibraryFolder.__table__,
     LibraryFile.__table__,
@@ -73,14 +75,19 @@ async def db():
 
 
 async def _seed_users(session):
-    """两个租户 + 四名用户：1=租户1 admin，2=租户1 alice，3=租户1 bob，9=租户2 eve。"""
+    """两个租户 + 团队：1=租户1 admin（团队一），2=alice（团队一），3=bob（团队一），
+    4=carol（团队二），5=dave（无团队·个人用户），9=租户2 eve。"""
     session.add_all([
         Tenant(id=1, name="租户一"),
         Tenant(id=2, name="租户二"),
-        User(id=1, tenant_id=1, username="admin", password_hash="x", name="管理员", role="admin"),
-        User(id=2, tenant_id=1, username="alice", password_hash="x", name="甲", role="user"),
-        User(id=3, tenant_id=1, username="bob", password_hash="x", name="乙", role="user"),
-        User(id=9, tenant_id=2, username="eve", password_hash="x", name="丙", role="user"),
+        UserGroup(id=1, tenant_id=1, name="团队一"),
+        UserGroup(id=2, tenant_id=1, name="团队二"),
+        User(id=1, tenant_id=1, username="admin", password_hash="x", name="管理员", role="admin", group_id=1),
+        User(id=2, tenant_id=1, username="alice", password_hash="x", name="甲", role="member", group_id=1),
+        User(id=3, tenant_id=1, username="bob", password_hash="x", name="乙", role="member", group_id=1),
+        User(id=4, tenant_id=1, username="carol", password_hash="x", name="丙", role="member", group_id=2),
+        User(id=5, tenant_id=1, username="dave", password_hash="x", name="丁", role="individual", group_id=None),
+        User(id=9, tenant_id=2, username="eve", password_hash="x", name="戊", role="member", group_id=None),
     ])
     await session.commit()
 
@@ -174,9 +181,31 @@ async def test_acl_edit_grant(db):
 async def test_team_visible_when_not_private(db):
     db.add(_file(1, owner_id=2, private=False))
     await db.commit()
-    bob = await _user(db, 3)
+    bob = await _user(db, 3)  # 与 owner 同团队
     assert await perms.get_access(db, 1, 3, "file", 1) == "read"
     assert await perms.accessible_ids(db, bob, "file") == [1]
+
+
+async def test_team_visible_isolated_across_teams(db):
+    """团队共享仅同团队可见：跨团队成员与无团队个人用户都看不到（含 accessible_ids）。"""
+    db.add(_file(1, owner_id=2, private=False))
+    await db.commit()
+    carol = await _user(db, 4)   # 团队二
+    dave = await _user(db, 5)    # 无团队（个人用户）
+    assert await perms.get_access(db, 1, 4, "file", 1) is None
+    assert await perms.get_access(db, 1, 5, "file", 1) is None
+    assert await perms.accessible_ids(db, carol, "file") == []
+    assert await perms.accessible_ids(db, dave, "file") == []
+    # 个人用户自己的共享文件，团队成员也看不见
+    db.add(_file(2, owner_id=5, private=False))
+    await db.commit()
+    alice = await _user(db, 2)
+    assert await perms.get_access(db, 1, 2, "file", 2) is None
+    assert await perms.accessible_ids(db, alice, "file") == [1]  # 只有自己那份，看不到 dave 的
+    # 但 ACL 单用户授权不受团队限制：授权给跨团队的 carol 仍生效
+    db.add(_grant("file", 1, user_id=4, permission="read"))
+    await db.commit()
+    assert await perms.get_access(db, 1, 4, "file", 1) == "read"
 
 
 def test_legacy_null_is_private_counts_as_team_visible():
@@ -288,7 +317,7 @@ async def test_cross_tenant_invisible(db):
 
 async def test_kb_acl_and_team_visible(db):
     db.add(_kb(1, owner_id=2))                    # 私有
-    db.add(_kb(2, owner_id=2, private=False))     # 团队可见
+    db.add(_kb(2, owner_id=2, private=False))     # 团队共享
     db.add(_grant("kb", 1, user_id=3, permission="read"))
     await db.commit()
     bob = await _user(db, 3)
@@ -297,6 +326,10 @@ async def test_kb_acl_and_team_visible(db):
     assert await perms.get_access(db, 1, 3, "kb", 2) == "read"
     alice = await _user(db, 2)
     assert await perms.get_access(db, 1, 2, "kb", 1) == "owner"
+    # 跨团队（carol 团队二）：团队共享的 kb2 不可见
+    carol = await _user(db, 4)
+    assert await perms.get_access(db, 1, 4, "kb", 2) is None
+    assert await perms.accessible_ids(db, carol, "kb") == []
 
 
 async def test_notebook_owner_and_acl(db):

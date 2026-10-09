@@ -8,7 +8,7 @@
           style="width: 220px"
           clearable
         />
-        <el-select v-model="query.group_id" placeholder="分组筛选" style="width: 150px" clearable @change="handleSearch">
+        <el-select v-model="query.group_id" placeholder="团队筛选" style="width: 150px" clearable @change="handleSearch">
           <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
         </el-select>
         <el-button type="primary" :icon="Search" @click="handleSearch">搜索</el-button>
@@ -22,12 +22,13 @@
         <el-table-column prop="phone" label="手机号" min-width="120" show-overflow-tooltip />
         <el-table-column label="角色" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="enumTagType(userRoleMap, row.role)">
-              {{ enumLabel(userRoleMap, row.role) }}
+            <!-- 个人用户（手机号自助注册）用醒目橙色 tag 区分，其余角色普通 tag -->
+            <el-tag size="small" :type="roleTagType(row.role)">
+              {{ roleLabel(row.role) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="分组" width="110" show-overflow-tooltip>
+        <el-table-column label="团队" width="110" show-overflow-tooltip>
           <template #default="{ row }">{{ row.group_name || '-' }}</template>
         </el-table-column>
         <el-table-column label="状态" width="80">
@@ -83,10 +84,11 @@
         </el-form-item>
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width: 100%" :disabled="isSelfRow">
-            <el-option v-for="(v, k) in userRoleMap" :key="k" :label="v.label" :value="k" />
+            <!-- 角色集合动态来自 roles 表，label 用名称、value 用标识 key -->
+            <el-option v-for="r in roles" :key="r.key" :label="r.name" :value="r.key" />
           </el-select>
         </el-form-item>
-        <el-form-item label="分组">
+        <el-form-item label="团队">
           <el-select v-model="form.group_id" style="width: 100%" clearable placeholder="可选">
             <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.id" />
           </el-select>
@@ -125,18 +127,24 @@ import { ElMessage } from 'element-plus'
 import { confirmDanger } from '../../utils/confirmDanger'
 import { validateForm } from '../../utils/validateForm'
 import {
-  getAdminUsers, createAdminUser, updateAdminUser, resetAdminUserPassword, deleteAdminUser, getAdminGroups,
+  getAdminUsers, createAdminUser, updateAdminUser, resetAdminUserPassword, deleteAdminUser, getAdminGroups, listRoles,
 } from '../../api'
 import { useAuthStore } from '../../stores/auth'
-import { userRoleMap, enumLabel, enumTagType, formatDateTime } from '../../utils/format'
+import { userRoleMap, enumTagType, formatDateTime } from '../../utils/format'
 
 const authStore = useAuthStore()
 const loading = ref(false)
 const list = ref([])
 const total = ref(0)
 const groups = ref([])
+const roles = ref([])  // 角色集合动态来自 roles 表（/admin/roles）
 const themeStore = useThemeStore()
 const query = reactive({ keyword: '', group_id: '', page: 1, page_size: themeStore.pageSize })
+
+// 角色显示：优先用 roles 接口返回的名称，拿不到时回退内置映射（种子/旧数据）
+const roleLabel = (key) =>
+  roles.value.find((r) => r.key === key)?.name || userRoleMap[key]?.label || key || '-'
+const roleTagType = (key) => (key === 'individual' ? 'warning' : enumTagType(userRoleMap, key))
 
 function onSizeChange() {
   query.page = 1
@@ -175,11 +183,19 @@ async function loadGroups() {
   } catch { /* 下拉可选 */ }
 }
 
+// 角色下拉数据源：角色集合是动态的（管理端「角色管理」可新增自定义角色）
+async function loadRoles() {
+  try {
+    const res = await listRoles()
+    roles.value = Array.isArray(res) ? res : (res?.items || [])
+  } catch { /* 接口失败时回退内置映射显示 */ }
+}
+
 // ========== 新增 / 编辑 ==========
 const formDrawer = ref(false)
 const saving = ref(false)
 const formRef = ref()
-const emptyForm = { id: null, username: '', password: '', name: '', email: '', phone: '', role: 'user', group_id: null }
+const emptyForm = { id: null, username: '', password: '', name: '', email: '', phone: '', role: 'member', group_id: null }
 const form = reactive({ ...emptyForm })
 const isSelfRow = computed(() => form.id != null && form.id === authStore.user?.id)
 const formRules = {
@@ -289,6 +305,7 @@ async function handleDelete(row) {
 onMounted(() => {
   loadList()
   loadGroups()
+  loadRoles()
 })
 </script>
 

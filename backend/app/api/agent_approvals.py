@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, get_db, require_admin
+from app.api.deps import get_current_user, get_db, require_perm
 from app.models.agent_approval import AgentApproval
 from app.models.user import User
 from app.schemas.agent_approval import (
@@ -66,9 +66,11 @@ async def list_approvals(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """审批单列表：admin 看全租户，普通用户只看自己发起的；支持 status 过滤。"""
+    """审批单列表：admin 及有 agent.approve 权限者看全租户，其余只看自己发起的。"""
+    from app.services.roles import has_perm
+
     filters = [AgentApproval.tenant_id == user.tenant_id]
-    if user.role != "admin":
+    if not await has_perm(db, user, "agent.approve"):
         filters.append(AgentApproval.requester_user_id == user.id)
     if status:
         filters.append(AgentApproval.status == status)
@@ -100,7 +102,7 @@ async def decide(
     approval_id: int,
     body: AgentApprovalDecide,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("agent.approve")),
 ):
     """审批（仅 admin）：approve 同步执行对应动作，结果写 result 并通知发起人。"""
     approval = await db.get(AgentApproval, approval_id)
@@ -126,7 +128,7 @@ async def decide(
 async def retry(
     approval_id: int,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("agent.approve")),
 ):
     """重试执行失败的审批单（仅 admin、仅 failed 态）：重新跑执行器，结果写 result。"""
     approval = await db.get(AgentApproval, approval_id)

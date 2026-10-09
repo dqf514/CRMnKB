@@ -2,8 +2,8 @@
   <div>
     <el-card>
       <div class="toolbar">
-        <span class="hint">分组用于组织用户，便于按团队管理</span>
-        <el-button type="primary" :icon="Plus" style="margin-left: auto" @click="openForm()">新增分组</el-button>
+        <span class="hint">团队用于组织用户，便于按团队协作与管理</span>
+        <el-button type="primary" :icon="Plus" style="margin-left: auto" @click="openForm()">新增团队</el-button>
       </div>
 
       <el-table :data="list" v-loading="loading" stripe>
@@ -24,16 +24,16 @@
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-if="!loading && !list.length" description="暂无分组" :image-size="80" />
+      <el-empty v-if="!loading && !list.length" description="暂无团队" :image-size="80" />
     </el-card>
 
-    <el-dialog v-model="formDialog" :title="form.id ? '编辑分组' : '新增分组'" width="min(90vw, 440px)">
+    <el-dialog v-model="formDialog" :title="form.id ? '编辑团队' : '新增团队'" width="min(90vw, 440px)">
       <el-form :model="form" :rules="formRules" ref="formRef" label-width="80px">
         <el-form-item label="名称" prop="name">
-          <el-input v-model="form.name" placeholder="分组名称" />
+          <el-input v-model="form.name" placeholder="团队名称" />
         </el-form-item>
         <el-form-item label="描述">
-          <el-input v-model="form.description" type="textarea" :rows="3" placeholder="这个分组包含哪些同事" />
+          <el-input v-model="form.description" type="textarea" :rows="3" placeholder="这个团队包含哪些同事" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -74,7 +74,7 @@ const saving = ref(false)
 const formRef = ref()
 const form = reactive({ id: null, name: '', description: '' })
 const formRules = {
-  name: [{ required: true, message: '请输入分组名称', trigger: 'blur' }],
+  name: [{ required: true, message: '请输入团队名称', trigger: 'blur' }],
 }
 
 function openForm(row) {
@@ -105,7 +105,7 @@ async function handleSave() {
 }
 
 async function handleDelete(row) {
-  const ok = await confirmDanger(`确定删除分组「${row.name}」吗？`)
+  const ok = await confirmDanger(`确定删除团队「${row.name}」吗？`)
   if (!ok) return
   try {
     await deleteAdminGroup(row.id)
@@ -115,7 +115,7 @@ async function handleDelete(row) {
     // 组内仍有成员时后端返回 400，把具体提示展示出来
     const detail = e?.response?.data?.detail
     if (e?.response?.status === 400) {
-      ElMessage.error(typeof detail === 'string' ? detail : '删除失败：分组内仍有成员')
+      ElMessage.error(typeof detail === 'string' ? detail : '删除失败：团队内仍有成员')
     }
   }
 }

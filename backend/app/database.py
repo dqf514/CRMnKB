@@ -56,7 +56,10 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS email VARCHAR(100)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url VARCHAR(500)"))
         await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS phone VARCHAR(20)"))
-        # 手机号租户内唯一（部分唯一索引，NULL 不参与），为后续手机号/微信登录做准备
+        # 验证码用途隔离（login/register）
+        await conn.execute(
+            text("ALTER TABLE login_codes ADD COLUMN IF NOT EXISTS purpose VARCHAR(20) DEFAULT 'login'")
+        )        # 手机号租户内唯一（部分唯一索引，NULL 不参与），为后续手机号/微信登录做准备
         await conn.execute(
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_tenant_phone "
@@ -320,6 +323,11 @@ async def init_db() -> None:
     async with AsyncSessionLocal() as session:
         tenant_count = await session.scalar(select(func.count()).select_from(Tenant))
         if tenant_count:
+            # 存量库：角色体系种子 + 迁移（幂等）：三系统角色 / 默认团队收纳存量用户 / role='user'→'member'
+            from app.services.roles import seed_roles
+
+            await seed_roles(session)
+            await session.commit()
             return
         tenant = Tenant(id=1, name="默认租户")
         session.add(tenant)
@@ -349,4 +357,9 @@ async def init_db() -> None:
             )
         )
         await session.commit()
-        logger.info("种子数据已写入：默认租户 / admin 用户 / 示例提醒规则")
+        # 新库：角色体系种子（三系统角色 + 默认团队并把 admin 划入）
+        from app.services.roles import seed_roles
+
+        await seed_roles(session)
+        await session.commit()
+        logger.info("种子数据已写入：默认租户 / admin 用户 / 示例提醒规则 / 系统角色")

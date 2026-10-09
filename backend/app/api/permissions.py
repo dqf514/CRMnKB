@@ -21,6 +21,7 @@ from app.models.resource_permission import ResourcePermission
 from app.models.user import User
 from app.services.audit import record_audit
 from app.services.permissions import ensure_owner
+from app.services.roles import has_perm
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +70,23 @@ async def _get_owned_or_404(db: AsyncSession, user: User, rtype: str, rid: int):
     return obj
 
 
-async def _target_user_or_404(db: AsyncSession, tenant_id: int, user_id: int) -> User:
+async def _target_user_or_404(
+    db: AsyncSession, tenant_id: int, user_id: int, sharer: User | None = None
+) -> User:
     u = await db.get(User, user_id)
     if u is None or u.tenant_id != tenant_id or getattr(u, "status", 1) == 0:
         raise HTTPException(status_code=404, detail="目标用户不存在")
+    # 团队隔离：非 admin 只能分享给同团队成员（双方 group_id 相同且非空）
+    if sharer is not None and sharer.role != "admin":
+        if sharer.group_id is None or u.group_id != sharer.group_id:
+            raise HTTPException(status_code=400, detail="只能分享给同团队的成员")
     return u
+
+
+async def _require_share_perm(db: AsyncSession, user: User) -> None:
+    """分享/可见性操作需要 share 权限点（admin 恒真；个人用户等无 share 权限的角色 403）。"""
+    if not await has_perm(db, user, "share"):
+        raise HTTPException(status_code=403, detail="当前角色没有分享权限")
 
 
 async def _acl_list(db: AsyncSession, tenant_id: int, rtype: str, rid: int, owner_id: int) -> list[dict]:
@@ -119,7 +132,8 @@ async def batch_share_files(
     user: User = Depends(get_current_user),
 ):
     """批量分享多个文件给同一用户（owner 可调）。"""
-    target = await _target_user_or_404(db, user.tenant_id, body.user_id)
+    await _require_share_perm(db, user)
+    target = await _target_user_or_404(db, user.tenant_id, body.user_id, sharer=user)
     shared = 0
     for fid in body.file_ids:
         obj = await _get_owned_or_404(db, user, "file", fid)
@@ -179,8 +193,9 @@ async def share_resource(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_share_perm(db, user)
     obj = await _get_owned_or_404(db, user, rtype, rid)
-    target = await _target_user_or_404(db, user.tenant_id, body.user_id)
+    target = await _target_user_or_404(db, user.tenant_id, body.user_id, sharer=user)
     existing = await db.scalar(
         select(ResourcePermission).where(
             ResourcePermission.tenant_id == user.tenant_id,
@@ -222,6 +237,7 @@ async def update_share(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_share_perm(db, user)
     await _get_owned_or_404(db, user, rtype, rid)
     row = await db.scalar(
         select(ResourcePermission).where(
@@ -251,6 +267,7 @@ async def revoke_share(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_share_perm(db, user)
     await _get_owned_or_404(db, user, rtype, rid)
     await db.execute(
         ResourcePermission.__table__.delete().where(
@@ -272,6 +289,7 @@ async def set_visibility(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    await _require_share_perm(db, user)
     obj = await _get_owned_or_404(db, user, rtype, rid)
     obj.is_private = body.is_private
     record_audit(db, user, "visibility", rtype, rid, {"is_private": body.is_private})

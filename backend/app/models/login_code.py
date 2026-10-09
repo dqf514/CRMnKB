@@ -19,6 +19,8 @@ class LoginCode(Base):
     phone: Mapped[str] = mapped_column(String(20), index=True)
     code_hash: Mapped[str] = mapped_column(String(64))
     channel: Mapped[str] = mapped_column(String(20), default="sms")
+    # 用途隔离：login=登录验证码 / register=注册验证码（登录码不能拿去注册）
+    purpose: Mapped[str] = mapped_column(String(20), default="login")
     ip: Mapped[str | None] = mapped_column(String(64))
     expires_at: Mapped[datetime]
     attempts: Mapped[int] = mapped_column(default=0)

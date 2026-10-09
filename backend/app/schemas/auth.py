@@ -1,4 +1,5 @@
 import json
+from typing import Literal
 
 from pydantic import BaseModel, Field, RootModel, field_validator
 
@@ -27,6 +28,8 @@ class UserOut(BaseModel):
     avatar_url: str | None = None
     # 首登强制改密标记（种子 admin 等为 True；前端登录后拦截到改密页）
     must_change_password: bool = False
+    # 用户偏好（前端据此判断首次引导：preferences.onboarded === false → 强制 /onboarding）
+    preferences: dict = Field(default_factory=dict)
 
 
 class LoginRequest(BaseModel):
@@ -77,9 +80,26 @@ class PreferencesUpdate(RootModel[dict]):
 
 
 class SmsCodeRequest(BaseModel):
-    """发送短信登录验证码。"""
+    """发送短信验证码。purpose=login 登录 / register 注册（两用途隔离）。"""
 
     phone: str = Field(pattern=CN_MOBILE_PATTERN)
+    purpose: Literal["login", "register"] = "login"
+
+
+class RegisterRequest(BaseModel):
+    """手机号 + 验证码注册（新手机号自动建账号，默认 individual 角色）。"""
+
+    phone: str = Field(pattern=CN_MOBILE_PATTERN)
+    code: str = Field(min_length=4, max_length=8, pattern=r"^\d+$")
+    long_lived: bool = False
+
+
+class OnboardingRequest(BaseModel):
+    """首次进入引导：必填姓名 + 设置密码，可选邮箱；完成后 preferences.onboarded=true。"""
+
+    name: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=8)
+    email: str | None = None
 
 
 class PhoneLoginRequest(BaseModel):

@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { login as apiLogin, phoneLogin as apiPhoneLogin, getMe } from '../api'
+import { login as apiLogin, phoneLogin as apiPhoneLogin, register as apiRegister, onboarding as apiOnboarding, getMe } from '../api'
 
 // localStorage 里的 user 可能损坏（手工改过/旧版本格式），JSON.parse 抛错会导致 store 创建失败白屏
 function loadLocalUser() {
@@ -38,6 +38,16 @@ export const useAuthStore = defineStore('auth', {
     // 手机号 + 验证码登录（后端 /auth/login/phone）
     async loginByPhone(form) {
       const res = await apiPhoneLogin(form)
+      await this._applyAuth(res)
+    },
+    // 手机号注册（后端 /auth/register）：返回 TokenResponse，与登录同样落 store
+    async register(form) {
+      const res = await apiRegister(form)
+      await this._applyAuth(res)
+    },
+    // 首次引导（后端 /auth/onboarding）：设密码后旧 token 失效，返回的新 token/user 整体替换
+    async completeOnboarding(form) {
+      const res = await apiOnboarding(form)
       await this._applyAuth(res)
     },
     async fetchMe() {

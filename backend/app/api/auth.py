@@ -18,10 +18,12 @@ from app.models.user import User
 from app.services.audit import record_audit
 from app.schemas.auth import (
     LoginRequest,
+    OnboardingRequest,
     PasswordChange,
     PhoneLoginRequest,
     PreferencesUpdate,
     ProfileUpdate,
+    RegisterRequest,
     SmsCodeRequest,
     SsoExchangeRequest,
     TokenResponse,
@@ -120,15 +122,21 @@ async def login(body: LoginRequest, request: Request, db: AsyncSession = Depends
 
 @router.post("/sms-code")
 async def send_sms_code(body: SmsCodeRequest, request: Request, db: AsyncSession = Depends(get_db)):
-    """发送短信登录验证码。dev 环境 + log 通道时响应带 dev_code（前端自动填充）。"""
+    """发送短信验证码（purpose=login 登录 / register 注册）。dev 环境 + log 通道时响应带 dev_code。"""
     if not await sms_login_enabled(db):
         raise HTTPException(status_code=403, detail="短信登录未启用，请联系管理员")
+    if body.purpose == "register":
+        bound = await db.scalar(
+            select(User.id).where(User.phone == body.phone).limit(1)
+        )
+        if bound is not None:
+            raise HTTPException(status_code=400, detail="该手机号已注册，请直接登录")
     ip = request.client.host if request.client else "unknown"
     try:
-        dev_code = await issue_login_code(db, body.phone, ip)
+        dev_code = await issue_login_code(db, body.phone, ip, purpose=body.purpose)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    record_audit(db, None, "sms_code", "user", None, {"phone": body.phone}, ip)
+    record_audit(db, None, "sms_code", "user", None, {"phone": body.phone, "purpose": body.purpose}, ip)
     await db.commit()
     resp: dict = {"ok": True, "message": "验证码已发送"}
     if dev_code:
@@ -169,6 +177,96 @@ async def login_by_phone(body: PhoneLoginRequest, request: Request, db: AsyncSes
         user.id, user.username,
         expires_minutes=30 * 24 * 60 if body.long_lived else None,
     )
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserOut.model_validate(user),
+    )
+
+
+@router.post("/register", response_model=TokenResponse, status_code=201)
+async def register_by_phone(body: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    """手机号 + 验证码注册：新手机号自动建账号（individual 角色、无团队），签发 JWT 进入首次引导。
+
+    失败计数与登录共用 login_attempts 限流口径（防验证码爆破）。
+    """
+    if not await sms_login_enabled(db):
+        raise HTTPException(status_code=403, detail="短信注册未启用，请联系管理员")
+    ip = request.client.host if request.client else "unknown"
+    await _check_login_rate_limit(db, body.phone, ip)
+    if not await verify_login_code(db, body.phone, body.code, purpose="register"):
+        await _record_login_failure(db, body.phone, ip)
+        record_audit(db, None, "register", "user", None, {"phone": body.phone, "ok": False}, ip)
+        await db.commit()
+        raise HTTPException(status_code=400, detail="验证码错误或已过期")
+    existing = await db.scalar(select(User.id).where(User.phone == body.phone).limit(1))
+    if existing is not None:
+        await db.commit()  # 提交验证码已用标记
+        raise HTTPException(status_code=400, detail="该手机号已注册，请直接登录")
+    # 单租户部署：归属默认租户 1；username 用手机号（全局唯一约束与手机号一一对应）
+    tenant_id = 1
+    username = body.phone
+    if await db.scalar(select(User.id).where(User.username == username).limit(1)) is not None:
+        username = f"{body.phone}_{secrets.randbelow(9000) + 1000}"
+    user = User(
+        tenant_id=tenant_id,
+        username=username,
+        # 随机占位密码：引导页强制设置新密码；占位值不可逆猜出
+        password_hash=hash_password(secrets.token_urlsafe(24)),
+        name=body.phone,  # 占位姓名，引导页必填修改
+        role="individual",
+        group_id=None,  # 个人用户不进任何团队，待管理员授权升级
+        phone=body.phone,
+        status=1,
+        preferences={"onboarded": False},
+    )
+    db.add(user)
+    await db.flush()
+    await _clear_login_failures(db, body.phone, ip)
+    user.last_login_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    record_audit(db, user, "register", "user", user.id, {"ok": True, "via": "phone"}, ip)
+    await db.commit()
+    token = create_access_token(
+        user.id, user.username,
+        expires_minutes=30 * 24 * 60 if body.long_lived else None,
+    )
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user=UserOut.model_validate(user),
+    )
+
+
+@router.post("/onboarding", response_model=TokenResponse)
+async def complete_onboarding(
+    body: OnboardingRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """首次进入引导提交：姓名 + 密码（必填）+ 邮箱（可选）。
+
+    仅限 preferences.onboarded !== true 的用户调用（防已完成者被重放覆盖密码）。
+    响应内签发新令牌保持会话（前端需替换本地 token）。
+    """
+    prefs = dict(user.preferences or {})
+    if prefs.get("onboarded"):
+        raise HTTPException(status_code=400, detail="已完成初始设置，请直接在个人中心修改资料")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="姓名不能为空")
+    user.name = name
+    if body.email is not None:
+        user.email = body.email.strip() or None
+    user.password_hash = hash_password(body.password)
+    # 不写 password_changed_at：新账号没有需要作废的历史令牌（注册令牌即当前会话），
+    # 且同秒签发的新 token 会因 JWT iat 秒级截断被误判失效
+    user.must_change_password = False
+    prefs["onboarded"] = True
+    user.preferences = prefs  # 重新赋值触发 JSONB 变更检测
+    record_audit(db, user, "onboarding", "user", user.id, None, None)
+    await db.commit()
+    await db.refresh(user)
+    token = create_access_token(user.id, user.username)
     return TokenResponse(
         access_token=token,
         token_type="bearer",

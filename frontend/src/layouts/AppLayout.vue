@@ -345,7 +345,8 @@ const adminGroups = [
     label: '用户权限',
     items: [
       { path: '/admin/users', label: '用户管理', icon: User },
-      { path: '/admin/groups', label: '用户分组', icon: UserFilled },
+      { path: '/admin/roles', label: '角色管理', icon: Avatar },
+      { path: '/admin/groups', label: '团队管理', icon: UserFilled },
       { path: '/admin/audit-logs', label: '审计日志', icon: Tickets },
     ],
   },

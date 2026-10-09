@@ -203,9 +203,12 @@ async def _send_sms_xinxinyun(xcfg: dict, phone: str, code: str) -> None:
         raise RuntimeError(f"短信发送被拒：{result.get('msg') or result.get('code')}")
 
 
-async def issue_login_code(db: AsyncSession, phone: str, ip: str | None) -> str | None:
-    """生成并发送登录验证码（含限流）；返回 dev_code（非 dev 环境为 None）。
+async def issue_login_code(
+    db: AsyncSession, phone: str, ip: str | None, purpose: str = "login"
+) -> str | None:
+    """生成并发送验证码（含限流）；返回 dev_code（非 dev 环境为 None）。
 
+    purpose：login=登录 / register=注册，两用途互相隔离（登录码不能用于注册）。
     限流失败/发送失败抛 ValueError，由接口层转 400。
     调用方负责 commit。
     """
@@ -243,6 +246,7 @@ async def issue_login_code(db: AsyncSession, phone: str, ip: str | None) -> str 
             phone=phone,
             code_hash=_code_hash(phone, code),
             channel="sms",
+            purpose=purpose,
             ip=ip,
             expires_at=now + timedelta(minutes=_CODE_TTL_MINUTES),
         )
@@ -254,8 +258,10 @@ async def issue_login_code(db: AsyncSession, phone: str, ip: str | None) -> str 
         raise ValueError("验证码发送失败，请稍后重试或联系管理员") from None
 
 
-async def verify_login_code(db: AsyncSession, phone: str, code: str) -> bool:
-    """校验验证码：最新一条未用记录，过期/超次/不符均失败；通过则标记已用。
+async def verify_login_code(
+    db: AsyncSession, phone: str, code: str, purpose: str = "login"
+) -> bool:
+    """校验验证码：最新一条同用途未用记录，过期/超次/不符均失败；通过则标记已用。
 
     调用方负责 commit。
     """
@@ -264,6 +270,7 @@ async def verify_login_code(db: AsyncSession, phone: str, code: str) -> bool:
         .where(
             LoginCode.phone == phone,
             LoginCode.channel == "sms",
+            LoginCode.purpose == purpose,
             LoginCode.used.is_(False),
         )
         .order_by(LoginCode.id.desc())

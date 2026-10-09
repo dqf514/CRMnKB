@@ -83,8 +83,13 @@ export const batchShareFiles = (fileIds, data) => request.post('/api/v1/permissi
 
 // ========== 认证 ==========
 export const login = (data) => request.post('/api/v1/auth/login', data)
-export const sendSmsCode = (phone) => request.post('/api/v1/auth/sms-code', { phone })
+// purpose：login（默认）/ register（注册；已注册手机号会 400）
+export const sendSmsCode = (phone, purpose = 'login') => request.post('/api/v1/auth/sms-code', { phone, purpose })
 export const phoneLogin = (data) => request.post('/api/v1/auth/login/phone', data)
+// 手机号注册：新手机号自动建号（role=individual），返回 TokenResponse
+export const register = (data) => request.post('/api/v1/auth/register', data)
+// 首次引导：补全姓名/密码（/邮箱）；返回新 TokenResponse（设密码后旧 token 失效，必须整体替换）
+export const onboarding = (data) => request.post('/api/v1/auth/onboarding', data)
 export const getMe = () => request.get('/api/v1/auth/me')
 export const getPreferences = () => request.get('/api/v1/auth/preferences')
 export const updatePreferences = (data) => request.put('/api/v1/auth/preferences', data)
@@ -255,6 +260,13 @@ export const updateAdminUser = (id, data) => request.put(`/api/v1/admin/users/${
 export const resetAdminUserPassword = (id, newPassword) =>
   request.put(`/api/v1/admin/users/${id}/password`, { new_password: newPassword })
 export const deleteAdminUser = (id) => request.delete(`/api/v1/admin/users/${id}`)
+// 角色（RBAC）：标识 key 全局唯一，admin/is_system 角色受保护
+export const listRoles = () => request.get('/api/v1/admin/roles')
+export const createRole = (data) => request.post('/api/v1/admin/roles', data)
+export const updateRole = (id, data) => request.put(`/api/v1/admin/roles/${id}`, data)
+export const deleteRole = (id) => request.delete(`/api/v1/admin/roles/${id}`)
+// 权限点清单（分组返回，供角色编辑弹窗渲染权限矩阵）
+export const listPermissionKeys = () => request.get('/api/v1/admin/roles/permission-keys')
 // 分组
 export const getAdminGroups = () => request.get('/api/v1/admin/groups')
 export const createAdminGroup = (data) => request.post('/api/v1/admin/groups', data)

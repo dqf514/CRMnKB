@@ -38,6 +38,7 @@
           <el-tabs v-if="brandStore.smsLoginEnabled" v-model="loginTab" class="login-tabs">
             <el-tab-pane label="账号登录" name="account" />
             <el-tab-pane label="手机验证码登录" name="phone" />
+            <el-tab-pane label="注册" name="register" />
           </el-tabs>
           <!-- 账号密码登录 -->
           <el-form v-show="loginTab === 'account'" :model="form" :rules="rules" ref="formRef" size="large" @keyup.enter="handleLogin">
@@ -67,7 +68,7 @@
             <el-form-item prop="code">
               <div class="code-row">
                 <el-input v-model="phoneForm.code" placeholder="6 位验证码" maxlength="6" :prefix-icon="Key" />
-                <el-button class="code-btn" :disabled="codeCountdown > 0" :loading="codeSending" @click="handleSendCode">
+                <el-button class="code-btn" :disabled="codeCountdown > 0" :loading="codeSending" @click="handleSendCode(phoneFormRef, phoneForm, 'login')">
                   {{ codeCountdown > 0 ? `${codeCountdown}s 后重发` : '获取验证码' }}
                 </el-button>
               </div>
@@ -75,6 +76,25 @@
             <el-form-item>
               <el-button type="primary" style="width: 100%" :loading="loading" @click="handlePhoneLogin">
                 登 录
+              </el-button>
+            </el-form-item>
+          </el-form>
+          <!-- 手机号注册（与短信登录同受 sms_login_enabled 开关控制；成功后由路由守卫引导至 /onboarding 补全资料） -->
+          <el-form v-if="brandStore.smsLoginEnabled" v-show="loginTab === 'register'" :model="registerForm" :rules="registerRules" ref="registerFormRef" size="large" @keyup.enter="handleRegister">
+            <el-form-item prop="phone">
+              <el-input v-model="registerForm.phone" placeholder="手机号" maxlength="11" :prefix-icon="Iphone" />
+            </el-form-item>
+            <el-form-item prop="code">
+              <div class="code-row">
+                <el-input v-model="registerForm.code" placeholder="6 位验证码" maxlength="6" :prefix-icon="Key" />
+                <el-button class="code-btn" :disabled="codeCountdown > 0" :loading="codeSending" @click="handleSendCode(registerFormRef, registerForm, 'register')">
+                  {{ codeCountdown > 0 ? `${codeCountdown}s 后重发` : '获取验证码' }}
+                </el-button>
+              </div>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" style="width: 100%" :loading="loading" @click="handleRegister">
+                注 册
               </el-button>
             </el-form-item>
           </el-form>
@@ -147,14 +167,15 @@ const codeSending = ref(false)
 const codeCountdown = ref(0)
 let countdownTimer = null
 
-async function handleSendCode() {
-  await phoneFormRef.value.validateField('phone')
+// 发送短信验证码（登录/注册共用，purpose 区分；倒计时状态两 tab 同一时刻只会有一个在用）
+async function handleSendCode(targetRef, targetForm, purpose = 'login') {
+  await targetRef.validateField('phone')
   codeSending.value = true
   try {
-    const res = await sendSmsCode(phoneForm.phone)
+    const res = await sendSmsCode(targetForm.phone, purpose)
     // dev 环境 + log 通道：验证码直接带回，自动填充免去查日志
     if (res?.dev_code) {
-      phoneForm.code = res.dev_code
+      targetForm.code = res.dev_code
       ElMessage.success('开发模式：验证码已自动填充')
     } else {
       ElMessage.success('验证码已发送，10 分钟内有效')
@@ -182,6 +203,25 @@ async function handlePhoneLogin() {
     themeStore.syncFromServer()
     ElMessage.success('登录成功')
     router.push('/today')
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    loading.value = false
+  }
+}
+
+// ========== 手机号注册：成功即登录，preferences.onboarded=false 由路由守卫带去首次引导页 ==========
+const registerFormRef = ref()
+const registerForm = reactive({ phone: '', code: '' })
+const registerRules = phoneRules
+
+async function handleRegister() {
+  await registerFormRef.value.validate()
+  loading.value = true
+  try {
+    await authStore.register(registerForm)
+    ElMessage.success('注册成功')
+    router.push('/today')  // 守卫会拦截到 /onboarding 补全姓名与密码
   } catch {
     /* 拦截器已提示 */
   } finally {

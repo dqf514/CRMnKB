@@ -67,7 +67,7 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 ```bash
 cd backend
-pytest          # 789 个用例，pytest.ini 已配 asyncio_mode = auto
+pytest          # 819 个用例，pytest.ini 已配 asyncio_mode = auto
 
 # dsh PG 会话持久化插件的契约测试（TS，vitest，24 例）
 cd ../dsh/session-persistence-pg
@@ -85,14 +85,16 @@ npm test
 
 分层：**api（路由层）→ services（业务层）→ models（SQLAlchemy 表）/ schemas（pydantic DTO）**。
 
-- `api/`：每个业务域一个路由文件（auth / brand / users / customers / followups / opportunities / industries / kbs / library / rag / chat / notebooks / reports / feedback / permissions / workflows / reminders / tasks / notifications / recycle_bin / admin_users / admin_llm / admin_skills / admin_mcp / admin_system / admin_errors / admin_audit），统一在 `main.py` 挂 `/api/v1` 前缀。`api/deps.py` 是公共依赖注入（当前用户、admin 校验等）。
+- `api/`：每个业务域一个路由文件（auth / brand / users / customers / followups / opportunities / industries / kbs / library / rag / chat / notebooks / reports / feedback / permissions / workflows / reminders / tasks / notifications / recycle_bin / admin_users / admin_roles / admin_llm / admin_skills / admin_mcp / admin_system / admin_errors / admin_audit），统一在 `main.py` 挂 `/api/v1` 前缀。`api/deps.py` 是公共依赖注入（当前用户、`require_admin` 硬超管校验、`require_perm(key)` RBAC 权限点校验等）。
 - `services/`：业务逻辑核心。重点模块：
   - `ingestion.py`：文档解析→清洗→语义切片（512 字 + 64 重叠，Markdown 标题锚定）→向量化；多模态摄入也在此。
   - `rag.py` / `chat.py`：检索管线（问题改写→混合检索 blend→Rerank 三级降级→Small2Big 扩展→阈值兜底）与 SSE 流式问答。
   - `llm/`：LLM 抽象层（`base.py` + `api_llm.py` / `ollama_llm.py` 双实现 + `instrumented.py` + `factory.py` + `usage.py` 用量统计），模型配置 DB 优先、Key 加密。
   - `skills/`：Agent 工具调用框架（`builtin.py` 联网搜索/网页抓取 + `api_skill.py` + `mcp_skill.py` + `mcp_pool.py` MCP 连接池 + `mcp_discovery.py` + `registry.py`）。
-  - `mcp_server.py`：知识库 MCP server（FastMCP streamable-http，挂在 `/api/mcp`），供 dsh 基座消费。只读工具：`kb_search` / `kb_read_doc` / `kb_list` / `crm_list_customers`（客户全量名单+总数）/ `crm_search_customers` / `crm_get_customer` / `crm_list_followups` / `crm_list_opportunities` / `crm_list_tasks` / `crm_stats`（经营概览统计）/ `skill_list`（已启用自定义工具概要，不含 config 防泄露密钥）/ `skill_call`（通用派发：调用 skill_list 列出的任意已启用工具）/ `web_search` / `web_fetch`；审批制写工具：`crm_create_customer` / `crm_update_customer` / `crm_delete_customer` / `crm_create_opportunity` / `crm_create_task` / `crm_add_followup` / `mail_draft_create` / `skill_create_api`（AI 起草 API 工具配置——name/method/url/headers/body/parameters，批准即建 `skills` 行并启用，运行时由 `ApiSkill` 执行含 SSRF 校验；只落审批单，admin 在 Agent 审批页批准后由 `agent_approvals` 执行器落库——建/改客户走字段白名单、软删可恢复，防越权改 tenant/owner；执行失败（failed）的审批单可由 admin 经 `POST /agent-approvals/{id}/retry` 重试执行）。dsh 专用 JWT（`aud=dsh-mcp`，security.py `create_mcp_token`）鉴权；KB 工具 ACL 在工具内按 user_id 强制，CRM 工具按 tenant_id 隔离 + 客户级 ACL（`customers.is_private`：NULL/FALSE=团队共享全员可编辑，TRUE=仅 owner+被分享者+admin；复用 `resource_permissions` 三档授权与 `permissions.py` 的 `customer_visible_clause`/`get_access_for`，团队共享默认 edit 是协作型资源的刻意设计，与文档的只读不同）。个人记忆工具（免审批，严格按 user_id 隔离）：`memory_save` / `memory_list` / `memory_search` / `memory_delete`。
+  - `mcp_server.py`：知识库 MCP server（FastMCP streamable-http，挂在 `/api/mcp`），供 dsh 基座消费。只读工具：`kb_search` / `kb_read_doc` / `kb_list` / `crm_list_customers`（客户全量名单+总数）/ `crm_search_customers` / `crm_get_customer` / `crm_list_followups` / `crm_list_opportunities` / `crm_list_tasks` / `crm_stats`（经营概览统计）/ `skill_list`（已启用自定义工具概要，不含 config 防泄露密钥）/ `skill_call`（通用派发：调用 skill_list 列出的任意已启用工具）/ `web_search` / `web_fetch`；审批制写工具：`crm_create_customer` / `crm_update_customer` / `crm_delete_customer` / `crm_create_opportunity` / `crm_create_task` / `crm_add_followup` / `mail_draft_create` / `skill_create_api`（AI 起草 API 工具配置——name/method/url/headers/body/parameters，批准即建 `skills` 行并启用，运行时由 `ApiSkill` 执行含 SSRF 校验；只落审批单，admin 在 Agent 审批页批准后由 `agent_approvals` 执行器落库——建/改客户走字段白名单、软删可恢复，防越权改 tenant/owner；执行失败（failed）的审批单可由 admin 经 `POST /agent-approvals/{id}/retry` 重试执行）。dsh 专用 JWT（`aud=dsh-mcp`，security.py `create_mcp_token`）鉴权；KB 工具 ACL 在工具内按 user_id 强制，CRM 工具按 tenant_id 隔离 + 客户级 ACL（`customers.is_private`：NULL/FALSE=团队共享同团队可编辑，TRUE=仅 owner+被分享者+admin；复用 `resource_permissions` 三档授权与 `permissions.py` 的 `customer_visible_clause`/`get_access_for`，团队共享默认 edit 是协作型资源的刻意设计，与文档的只读不同）。个人记忆工具（免审批，严格按 user_id 隔离）：`memory_save` / `memory_list` / `memory_search` / `memory_delete`。
   - `memory.py`：个人记忆（跨工作区长期偏好/事实）。存 `user_memories` 表（user_id + content + source[agent/manual] + chat_session_id 追溯）；每用户上限 200 条 FIFO 淘汰、单条 500 字、相同内容去重；agent 新会话（session/new）时把最近 30 条注入 prompt（`<user-memory>` 块，仅注入发给 dsh 的文本，落库仍是用户原始问题；resume 会话不重复注入）；个人中心「我的记忆」页可查看/编辑/删除/清空（`GET/POST/PUT/DELETE /auth/memories`）。
+  - `roles.py`：RBAC 角色权限点服务。`admin` 为硬超管（`has_perm` 恒真，79 处 `require_admin` 不动）；`roles` 表管非超管角色（is_system 种子：admin[*] / member[share] / individual[]），可分配权限点 4 个（share / user.admin / agent.approve / system.admin[预留]），`get_role_perms` 60s 进程缓存 + 角色保存时失效；`deps.require_perm(key)` 用于 admin_users（user.admin）、admin_roles（user.admin）、agent_approvals 审批侧（agent.approve）、api/permissions 分享写操作（share）；`seed_roles` 在 init_db 幂等种子三角色 + 「默认团队」收纳存量无团队用户 + `role='user'→'member'` 迁移（新库在租户种子后调用，老库在租户检查分支调用）。admin 角色仅硬超管可授予（`_check_role_assignable` 防 user.admin 持有者自我提权）。
+  - `login_channels.py`：短信验证码全流程（`issue_login_code`/`verify_login_code` 带 `purpose` 参数 login/register 隔离——登录码不能注册、注册码不能登录，login_codes 表加 purpose 列）；`api/auth.py` 有 `POST /auth/register`（新手机号验证码自动建号：individual 角色、无团队、随机占位密码、`preferences.onboarded=False`，直发 JWT）与 `POST /auth/onboarding`（首次引导：姓名+密码必填、邮箱可选，置 onboarded=True 并签发新令牌——不写 password_changed_at，避免同秒 iat 截断误杀新令牌；已 onboarded 重复提交 400）；前端路由守卫按 `preferences.onboarded === false` 强制跳 /onboarding（显式 false 才拦，存量用户无该 key 不受影响）。
   - `acp_bridge.py`：dsh 桥接服务（**单租户单 dsh ACP 进程**，`dsh --profile acp`，PyPI 客户端 `agent-client-protocol`，asyncio 原生）；进程级 patch 在 `backend/data/dsh/patches/`（`acp-model.yml` 进程启动时按 DB 默认 chat 模型自动重写——llm-pi-ai kbcrm 路由 + acp 默认 provider/model，`base.yml` 禁用官方 jsonl 会话后端、启用 PG 持久化插件）；知识库 MCP 在每会话 `session/new`/`session/resume` 时动态挂载（headers 带该用户新签的 `aud=dsh-mcp` 令牌，不落盘）；`session/request_permission` 权限应答：只读白名单工具（kb_search/kb_read_doc/kb_list/crm_list_*/crm_search_*/crm_get_*/crm_stats/skill_list/memory_*）自动 allow，写工具/skill_call/web_search/web_fetch 及其余一律拒绝；`DSH_AGENT_ENABLED` 总开关默认关，`/chat/ask/agent/stream` 走 agent 模式（ChatSession.dsh_session_id 绑定 dsh 侧会话，init_db 幂等 ALTER 加列；resume 失败自动退回 session/new 并回写新 id）。
   - 其余：report（支持 Agent 模式：`params.agent=true` 时经 acp_bridge 由 dsh 多步检索/撰写 Markdown，再单独排版 HTML；输出退化或 agent 运行失败自动回退固定管线）/ pdf / pptx / notebook / workflow（daily/weekly 触发时间按服务器本地时间解释）/ reminder / permissions / monitoring / backup（备份目录名/manifest 一律 UTC，Z 后缀；定时自动备份开关 system_settings `backup_auto_enabled`（默认关，管理端 `GET/PUT /admin/system/auto-backup`），开启后由告警循环每个 UTC 日备份一次）/ maintenance / audit / email / customer_io / profile / file_context / ai_tasks 等。
   - CRM 反馈改造（2026-09）：`pipeline_brief.py`（AI 阶段简报：`POST /customers/{id}/brief/refresh`，跟进创建后自动刷新，写回 `customers.ai_brief/ai_brief_at`）；`email_draft.py`（AI 邮件草稿：`POST /customers/{id}/email-draft`，只生成不发送，写作规范存 system_settings `email_guide`，管理端「系统设置 → 邮件写作规范」维护）；客户 DDQ 状态（`customers.ddq_status`：none/pending/completed，列表可按 `ddq_status` 过滤）；跟进记录带 `next_step`；`GET /tasks` 支持 `customer_id` 过滤；沙箱重置 `POST /admin/system/reset-sandbox`（仅 ENV=dev/sandbox/test，先自动备份再 TRUNCATE 业务表，保留用户/模型/系统配置）；一键系统更新 `POST /admin/system/update`（admin 限定，`UPDATE_SCRIPT` 指向服务器脚本才启用——模板 `deploy/update.sh`：git pull → 按需 pip/前端构建 → 延迟 systemctl restart；脚本路径只走配置不接受传参，执行前落审计；前端「系统设置 → 系统更新」tab 在 enabled 时才显示）；`/brand` 公开配置下发 `env`（前端沙箱横幅）；文档资料类型 `doc_metadata["category"]`（上传可带 category，`PUT /library/files/{id}/category` 可改）；类型列表动态配置 `services/doc_categories.py`（system_settings `doc_categories`，默认五项，`GET /library/categories` 读取、管理端「系统设置 → 文档资料类型」`PUT /admin/settings/doc-categories` 整体替换增删改，上传/改标签按动态配置校验，删除类型不影响存量文件——未知值展示回退原始标识；前端 `stores/docCategories.js` 全局缓存）。
@@ -127,7 +129,7 @@ dsh（DeepSeek Harness）作为 Agent 运行时被 FastAPI 内嵌管理：**单�
 
 ## 数据库与迁移约定（重要）
 
-- **没有 Alembic**。首次启动 `init_db()`（`backend/app/database.py`）自动 `create_all` 建表 + 创建 pgvector/pg_trgm 扩展 + HNSW/GIN 索引，并写种子数据（默认租户 + 管理员 `admin / admin123`）。
+- **没有 Alembic**。首次启动 `init_db()`（`backend/app/database.py`）自动 `create_all` 建表 + 创建 pgvector/pg_trgm 扩展 + HNSW/GIN 索引，并写种子数据（默认租户 + 管理员 `admin / admin123` + 三个系统角色 + 默认团队）。
 - 存量库升级走**幂等迁移**：在 `init_db()` 里追加 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` 等语句（已有大量先例）。改模型字段时新库由 create_all 覆盖，老库必须在这里补幂等 ALTER，两边都要考虑。
 - 向量维度由 `EMBEDDING_DIM` 配置（默认 1024，对应 bge-m3），换嵌入模型要注意维度一致。
 
@@ -143,9 +145,10 @@ dsh（DeepSeek Harness）作为 Agent 运行时被 FastAPI 内嵌管理：**单�
 - JWT 鉴权；非 dev 环境（`ENV != dev`）弱 `JWT_SECRET`（默认值或 <32 字符）**拒绝启动**（`settings.validate_jwt_secret()`，在 lifespan 里调用）。
 - 登录限流持久化在 DB（`login_attempts` 表：账号维度不分 IP 15 分钟失败 5 次锁定，IP 全局熔断）。种子 admin 首登强制改密（`users.must_change_password`）。
 - 密码策略最小 8 位，改密后旧 JWT 失效（`password_changed_at`）；LLM API Key 加密存储、脱敏显示。
-- CORS 显式白名单（不开 credentials）；内容权限默认私有，三档授权（只读/编辑/所有权）+ 团队可见开关；客户同样支持私有开关（`is_private`）与三档授权，但默认团队共享=全员可编辑（协作型资源），改客户/跟进/商机/任务/工作台/日历/MCP 查询时必须保留 `customer_visible_clause` 过滤；**RAG 检索仅限用户可读范围**，改动检索代码时必须保留 ACL 过滤。
+- CORS 显式白名单（不开 credentials）；内容权限默认私有，三档授权（只读/编辑/所有权）+ 团队共享开关（**团队语义**：`is_private` NULL/FALSE 仅对 owner 同团队成员可见——双方 `users.group_id` 相同且非空，NULL≠NULL；无团队的个人用户不参与任何团队共享，ACL 单用户授权不受团队限制）；客户同样支持私有开关（`is_private`）与三档授权，但默认团队共享=同团队可编辑（协作型资源），改客户/跟进/商机/任务/工作台/日历/MCP 查询时必须保留 `customer_visible_clause` 过滤；分享目标必须是同团队成员（`api/permissions.py` 校验），`GET /users` 非 admin 只返回同团队成员；**RAG 检索仅限用户可读范围**，改动检索代码时必须保留 ACL 过滤。
+- RBAC：`admin` 是硬超管（绕过 ACL 与全部权限点），`/admin/*`、`/recycle-bin` 等路由必须保持 admin 或对应权限点校验（`require_admin` / `require_perm`）；角色可配置（roles 表，管理端「角色管理」矩阵维护），`users.role` 引用 roles.key，admin 角色仅硬超管可授予。
 - 文件访问令牌短时效（`?t=`）；回收站软删（`deleted_at`）可恢复，彻底删除后自动 VACUUM。
-- 管理员（admin）绕过 ACL；`/admin/*`、`/recycle-bin` 等路由必须保持 admin 校验。
+- 短信验证码注册（`/auth/register`）：仅 `login_integrations.sms.enabled` 开启时可用；新账号默认 `individual` 角色（无共享能力、不进团队、内容对他人不可见），管理员改角色/分团队后升级为团队用户。
 
 ## 部署
 

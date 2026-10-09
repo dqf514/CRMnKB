@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_db, require_admin
+from app.api.deps import get_db, require_perm
 from app.core.security import hash_password
 from app.models.ai_feedback import AiFeedback
 from app.models.chat_session import ChatSession
@@ -30,12 +30,32 @@ from app.schemas.admin import (
     GroupUpdate,
 )
 
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
+router = APIRouter(
+    prefix="/admin", tags=["admin"], dependencies=[Depends(require_perm("user.admin"))]
+)
 
 
 # ---------------------------------------------------------------------------
 # 用户管理
 # ---------------------------------------------------------------------------
+
+async def _check_role_assignable(
+    db: AsyncSession, tenant_id: int, role: str, operator: User
+) -> None:
+    """角色必须存在于 roles 表；admin 角色仅硬超管可授予（防 user.admin 持有者自我提权）。"""
+    if role == "admin":
+        if operator.role != "admin":
+            raise HTTPException(status_code=403, detail="仅超级管理员可授予 admin 角色")
+        return
+    from app.models.role import Role
+
+    exists = await db.scalar(
+        select(func.count()).select_from(Role).where(
+            Role.tenant_id == tenant_id, Role.key == role
+        )
+    )
+    if not exists:
+        raise HTTPException(status_code=400, detail=f"角色不存在：{role}")
 
 def _admin_user_out(u: User, group_name: str | None = None) -> AdminUserOut:
     return AdminUserOut(
@@ -73,7 +93,7 @@ async def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     filters = [User.tenant_id == admin.tenant_id]
     if keyword:
@@ -102,7 +122,7 @@ async def create_user(
     body: AdminUserCreate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     exists = await db.scalar(
         select(func.count()).select_from(User).where(User.username == body.username)
@@ -113,6 +133,7 @@ async def create_user(
         group = await db.get(UserGroup, body.group_id)
         if group is None or group.tenant_id != admin.tenant_id:
             raise HTTPException(status_code=404, detail="分组不存在")
+    await _check_role_assignable(db, admin.tenant_id, body.role, admin)
     await _check_phone_unique(db, admin.tenant_id, body.phone)
     user = User(
         tenant_id=admin.tenant_id,
@@ -147,7 +168,7 @@ async def update_user(
     body: AdminUserUpdate,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     target = await _get_user_or_404(db, admin.tenant_id, user_id)
     updates = body.model_dump(exclude_unset=True)
@@ -161,6 +182,8 @@ async def update_user(
         group = await db.get(UserGroup, updates["group_id"])
         if group is None or group.tenant_id != admin.tenant_id:
             raise HTTPException(status_code=404, detail="分组不存在")
+    if updates.get("role"):
+        await _check_role_assignable(db, admin.tenant_id, updates["role"], admin)
     if "phone" in updates:
         await _check_phone_unique(db, admin.tenant_id, updates["phone"], exclude_user_id=target.id)
     for field, value in updates.items():
@@ -182,7 +205,7 @@ async def reset_password(
     body: AdminPasswordReset,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     target = await _get_user_or_404(db, admin.tenant_id, user_id)
     target.password_hash = hash_password(body.new_password)
@@ -212,7 +235,7 @@ async def delete_user(
     user_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     target = await _get_user_or_404(db, admin.tenant_id, user_id)
     if target.id == admin.id:
@@ -244,7 +267,7 @@ async def delete_user(
 @router.get("/groups", response_model=list[GroupOut])
 async def list_groups(
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     stmt = (
         select(UserGroup)
@@ -259,7 +282,7 @@ async def list_groups(
 async def create_group(
     body: GroupCreate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     group = UserGroup(tenant_id=admin.tenant_id, name=body.name, description=body.description)
     db.add(group)
@@ -280,7 +303,7 @@ async def update_group(
     group_id: int,
     body: GroupUpdate,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     group = await _get_group_or_404(db, admin.tenant_id, group_id)
     for field, value in body.model_dump(exclude_unset=True).items():
@@ -294,7 +317,7 @@ async def update_group(
 async def delete_group(
     group_id: int,
     db: AsyncSession = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_perm("user.admin")),
 ):
     group = await _get_group_or_404(db, admin.tenant_id, group_id)
     member_count = await db.scalar(

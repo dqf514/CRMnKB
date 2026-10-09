@@ -30,7 +30,7 @@ class AdminUserCreate(BaseModel):
     username: str
     password: str = Field(min_length=8)
     name: str
-    role: str = "user"
+    role: str = "member"
     group_id: int | None = None
     email: str | None = None
     phone: str | None = Field(None, pattern=CN_MOBILE_PATTERN)
@@ -71,6 +71,38 @@ class GroupOut(BaseModel):
     name: str
     description: str | None = None
     created_at: datetime
+
+
+# ---------- 角色管理（RBAC） ----------
+
+# 角色 key 格式：小写字母开头，字母/数字/下划线/中划线（users.role 引用此值）
+ROLE_KEY_PATTERN = r"^[a-z][a-z0-9_-]{1,49}$"
+
+
+class RoleOut(BaseModel):
+    model_config = {"from_attributes": True}
+
+    id: int
+    tenant_id: int
+    key: str
+    name: str
+    description: str | None = None
+    is_system: bool
+    permissions: list[str] = []
+    created_at: datetime
+
+
+class RoleCreate(BaseModel):
+    key: str = Field(pattern=ROLE_KEY_PATTERN)
+    name: str = Field(min_length=1, max_length=100)
+    description: str | None = None
+    permissions: list[str] = []
+
+
+class RoleUpdate(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=100)
+    description: str | None = None
+    permissions: list[str] | None = None
 
 
 # ---------- LLM 模型管理 ----------

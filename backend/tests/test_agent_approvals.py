@@ -687,6 +687,9 @@ def _override_user(user):
 
 async def test_list_scopes_by_role(client):
     """admin 看全租户（无 requester 过滤），普通用户只看自己发起的。"""
+    from app.services.roles import invalidate_role_cache
+
+    invalidate_role_cache()  # 防角色权限缓存跨用例污染 fake 结果队列
     rows = [_approval(id=7), _approval(id=8, requester_user_id=2)]
 
     db_admin = _FakeSession(results=[rows])
@@ -698,7 +701,8 @@ async def test_list_scopes_by_role(client):
     where = str(db_admin.statements[0].whereclause)
     assert "requester_user_id" not in where  # admin 不加发起人过滤
 
-    db_member = _FakeSession(results=[[rows[0]]])
+    # member 无 agent.approve 权限：首个空结果是 roles 权限点查询（未命中→只看自己发起的）
+    db_member = _FakeSession(results=[[], [rows[0]]])
     _override_db(db_member)
     _override_user(_user(1))
     resp = await client.get(
@@ -706,7 +710,7 @@ async def test_list_scopes_by_role(client):
     )
     assert resp.status_code == 200
     assert len(resp.json()) == 1
-    where = str(db_member.statements[0].whereclause)
+    where = str(db_member.statements[1].whereclause)
     assert "requester_user_id" in where  # 普通用户按发起人过滤
     assert "status" in where  # status 过滤生效
 

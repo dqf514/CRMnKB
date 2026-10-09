@@ -149,6 +149,8 @@ export const workflowRunStatusMap = {
 
 export const userRoleMap = {
   admin: { label: '管理员', type: 'danger' },
+  member: { label: '团队成员', type: 'primary' },
+  individual: { label: '个人用户', type: 'warning' },
   user: { label: '普通用户', type: 'primary' },
 }
 

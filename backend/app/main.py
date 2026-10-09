@@ -13,6 +13,7 @@ from app.api import (
     admin_errors,
     admin_llm,
     admin_mcp,
+    admin_roles,
     admin_skills,
     admin_system,
     admin_settings,
@@ -240,6 +241,7 @@ app.include_router(feedback.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(workflows.router, prefix="/api/v1")
 app.include_router(admin_users.router, prefix="/api/v1")
+app.include_router(admin_roles.router, prefix="/api/v1")
 app.include_router(admin_llm.router, prefix="/api/v1")
 app.include_router(admin_skills.router, prefix="/api/v1")
 app.include_router(admin_mcp.router, prefix="/api/v1")
