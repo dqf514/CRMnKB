@@ -817,6 +817,8 @@ async def stream_agent_chat_events(
     user: User,
     question: str,
     session: ChatSession,
+    kb_ids: list[int] | None = None,
+    file_ids: list[int] | None = None,
 ):
     """dsh agent 模式的 SSE 事件流：meta → token*/tool* → done；失败发 error 帧。
 
@@ -863,14 +865,25 @@ async def stream_agent_chat_events(
         yield {"type": "error", "detail": "agent 会话创建失败，请稍后重试"}
         return
 
+    # 关联范围注入（每轮都注，关联可能随消息变化；只作用于发给 dsh 的 prompt，不落库）：
+    # 关联 KB 给出 kb_id 引导 kb_search 定向检索；关联文件小文档直读全文，大文档给 doc_id 引导 kb_read_doc
+    prompt_text = question
+    if kb_ids or file_ids:
+        try:
+            from app.services.agent_context import build_attached_context
+            attached = await build_attached_context(db, user, kb_ids, file_ids)
+            if attached:
+                prompt_text = f"{attached}\n\n{prompt_text}"
+        except Exception:
+            logger.warning("构建关联范围上下文失败，按无关联继续", exc_info=True)
+
     # 新 dsh 会话才注入个人记忆（resume 的会话 dsh 侧已有上下文，重复注入浪费 token）；
     # 注入只作用于发给 dsh 的 prompt，落库的仍是用户原始问题
-    prompt_text = question
     if fresh_session:
         try:
             block = memory_context_block(await list_memories(db, user.id, limit=30))
             if block:
-                prompt_text = f"{block}\n\n{question}"
+                prompt_text = f"{block}\n\n{prompt_text}"
         except Exception:
             logger.warning("加载用户记忆失败，按无记忆继续", exc_info=True)
 

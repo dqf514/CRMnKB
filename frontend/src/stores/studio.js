@@ -235,7 +235,7 @@ export const useStudioStore = defineStore('studio', {
       chat.abortCtrl = ctrl
       try {
         const stream = agent
-          ? agentAskStream({ question: q, session_id: chat.sessionId, signal: ctrl.signal })
+          ? agentAskStream({ question: q, session_id: chat.sessionId, kb_ids: kbIds, file_ids: fileIds, signal: ctrl.signal })
           : askStream({
               question: q,
               kb_ids: kbIds,

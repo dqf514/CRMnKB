@@ -158,18 +158,24 @@ def _payload_from_ctx(ctx: Context) -> dict:
 
 
 async def kb_search_impl(
-    db: AsyncSession, user: User, query: str, top_k: int = 5
+    db: AsyncSession, user: User, query: str, top_k: int = 5,
+    kb_ids: list[int] | None = None,
 ) -> list[dict]:
     """混合检索当前用户可读范围内的切片（MCP 工具 kb_search 的实现，可独立测试）。
 
     复用 rag.py 管线：blend 二阶段检索（失败回退 embedding+trgm RRF）→ Small2Big
     扩展 → 文件信息回填。不做 LLM 问答、不做 rerank（dsh 侧 agent 自行判断相关性）。
+    kb_ids 可选：限定检索的知识库范围（与 ACL 可读范围取交集，防越权指定）。
     """
     top_k = max(1, min(int(top_k), 20))
     # ACL：只检索用户可读的 KB（管理员为全部）
-    kb_ids = await accessible_ids(db, user, "kb")
-    if not kb_ids:
+    allowed_kb_ids = await accessible_ids(db, user, "kb")
+    if kb_ids:
+        requested = {int(x) for x in kb_ids}
+        allowed_kb_ids = [k for k in allowed_kb_ids if k in requested]
+    if not allowed_kb_ids:
         return []
+    kb_ids = allowed_kb_ids
     embed_llm = await resolve_embed_llm(caller="mcp", tenant_id=user.tenant_id)
     query_vec = (await embed_llm.embed([query]))[0]
     try:
@@ -258,12 +264,14 @@ async def kb_read_doc_impl(
 
 @kb_mcp.tool(
     name="kb_search",
-    description="在企业知识库中检索与问题相关的文档切片，返回 doc_id、标题、内容、相关度与文件信息。只能检索当前用户有权限的资料。",
+    description="在企业知识库中检索与问题相关的文档切片，返回 doc_id、标题、内容、相关度与文件信息。只能检索当前用户有权限的资料。可选 kb_ids 限定检索的知识库范围（越权指定会被自动过滤）。",
 )
-async def _kb_search_tool(query: str, top_k: int = 5, ctx: Context = None) -> list[dict]:
+async def _kb_search_tool(
+    query: str, top_k: int = 5, kb_ids: list[int] | None = None, ctx: Context = None
+) -> list[dict]:
     async with AsyncSessionLocal() as db:
         user = await resolve_mcp_user(db, _payload_from_ctx(ctx))
-        return await kb_search_impl(db, user, query, top_k)
+        return await kb_search_impl(db, user, query, top_k, kb_ids)
 
 
 @kb_mcp.tool(

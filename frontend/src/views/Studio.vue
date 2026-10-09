@@ -466,7 +466,7 @@ async function send(q) {
   question.value = ''
   scrollToBottom()
   // 流式循环在 store 内执行：组件卸载/切换工作区不中断，回来可直接看到结果
-  // Agent 模式下 kbIds/fileIds/thinking 会被 store 忽略（后端不接受这些参数）
+  // Agent 模式下 kbIds/fileIds 注入为关联上下文（KB 定向检索/文件直读），thinking 会被忽略
   await studio.sendChat(nbId, {
     question: q,
     kbIds: [...studio.selectedKbIds],

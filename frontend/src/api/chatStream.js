@@ -65,12 +65,15 @@ export function askStream({ session_id, question, top_k, kb_ids, file_ids, think
   }, signal)
 }
 
-// dsh Agent 模式：由 dsh 自主规划检索，不接受 kb_ids/file_ids/thinking；
+// dsh Agent 模式：由 dsh 自主规划检索，thinking 不适用；
+// kb_ids/file_ids 会注入为关联上下文（KB 引导定向检索、小文件直读全文、大文件引导 kb_read_doc）。
 // 帧约定与 askStream 一致，token 帧按块到达（每个 agent step 一整块 Markdown），
 // tool 帧额外带 call_id/is_error，done 帧带可选 finish_reason
-export function agentAskStream({ session_id, question, signal }) {
+export function agentAskStream({ session_id, question, kb_ids, file_ids, signal }) {
   return _ssePost('/api/v1/chat/ask/agent/stream', {
     session_id: session_id ?? undefined,
     question,
+    kb_ids: kb_ids?.length ? kb_ids : undefined,
+    file_ids: file_ids?.length ? file_ids : undefined,
   }, signal)
 }

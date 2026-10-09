@@ -86,7 +86,7 @@ async def test_agent_stream_sse_sequence(client, monkeypatch):
     monkeypatch.setattr(settings, "DSH_AGENT_ENABLED", True)
     _override_auth(_user())
 
-    async def _fake_events(db, user, question, session):
+    async def _fake_events(db, user, question, session, kb_ids=None, file_ids=None):
         yield {"type": "meta", "session_id": session.id}
         yield {"type": "token", "content": "块一"}
         yield {"type": "tool", "name": "mcp__kb__kb_search", "status": "start", "call_id": "c1"}

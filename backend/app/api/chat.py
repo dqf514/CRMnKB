@@ -180,7 +180,8 @@ async def ask_agent_stream(
 
     与 /ask/stream 同一套 SSE 帧约定（meta/token/tool/done/error），
     由 dsh 基座驱动 agent 循环，知识库检索经 /api/mcp 的 kb_* 工具完成。
-    kb_ids/file_ids/thinking 参数在 agent 模式下不适用（由 dsh 自主规划）。
+    kb_ids/file_ids 会注入为关联上下文（KB 引导定向检索、小文件直读全文、大文件引导 kb_read_doc），
+    thinking 参数在 agent 模式下不适用（由 dsh 自主规划）。
     """
     if not settings.DSH_AGENT_ENABLED:
         raise HTTPException(status_code=503, detail="dsh agent 功能未启用（DSH_AGENT_ENABLED=false）")
@@ -192,7 +193,7 @@ async def ask_agent_stream(
     await db.commit()
 
     async def event_source():
-        agen = stream_agent_chat_events(db, user, body.question, session)
+        agen = stream_agent_chat_events(db, user, body.question, session, body.kb_ids, body.file_ids)
         # 心跳保活（同 /ask/stream）：agent 工具调用可能长时间无帧
         pending: asyncio.Task | None = None
         try:
