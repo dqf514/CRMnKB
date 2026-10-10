@@ -294,8 +294,11 @@ async function handleCapture() {
     capturedSuggestions.value = res.suggested_customers || []
     captureText.value = ''
     captureFiles.value = []
-    ElMessage.success(fileIds.length ? `已记入「随手记」笔记本（含 ${fileIds.length} 个附件）` : '已记入「随手记」笔记本')
+    const baseMsg = fileIds.length ? `已记入「随手记」笔记本（含 ${fileIds.length} 个附件）` : '已记入「随手记」笔记本'
+    // 识别到提醒意图时后端已建任务（日历可见 + 临期通知），提示并刷新日历
+    ElMessage.success(res.reminder ? `${baseMsg}，已创建提醒：${res.reminder.due_at_local}「${res.reminder.title}」` : baseMsg)
     load()  // 刷新今日新增计数
+    if (res.reminder) loadCalendar()
   } finally {
     capturing.value = false
   }

@@ -46,7 +46,8 @@ async def quick_capture(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """随手记：存入个人「随手记」笔记本；识别文本中提到的客户名，返回建议关联。"""
+    """随手记：存入个人「随手记」笔记本；识别文本中提到的客户名，返回建议关联；
+    含提醒意图（"明天记得提醒我…"）时自动建带到期时间的任务（进日历、临期通知）。"""
     # 个人随手记笔记本（每人一个，幂等）
     nb = (
         await db.execute(
@@ -113,9 +114,21 @@ async def quick_capture(
         for cid, name in customers
         if name and len(name) >= 2 and name in text
     ][:5]
+
+    # 提醒意图识别：文本含"提醒我/记得 + 时间词"时 LLM 抽取并自动建任务
+    # （进日历 + task_due_soon 临期通知）；提到客户则任务挂到首个匹配客户。
+    # 失败只记日志，不影响随手记主流程
+    from app.services.capture_reminder import maybe_create_capture_reminder
+
+    reminder = await maybe_create_capture_reminder(
+        db, user, text, customer_id=suggested[0]["id"] if suggested else None
+    )
+    if reminder:
+        await db.commit()
     return {
         "note_id": note.id,
         "notebook_id": nb.id,
         "suggested_customers": suggested,
         "attachments": attachments,
+        "reminder": reminder,
     }

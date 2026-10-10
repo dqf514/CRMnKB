@@ -69,6 +69,7 @@ export const taskTypeMap = {
   call: { label: '电话', type: 'primary' },
   email: { label: '邮件', type: 'warning' },
   report: { label: '报告', type: 'info' },
+  todo: { label: '待办', type: 'danger' },
 }
 
 export const taskPriorityMap = {
@@ -88,6 +89,7 @@ export const taskSourceMap = {
   manual: { label: '手动', type: 'info' },
   rule: { label: '规则', type: 'warning' },
   ai_analysis: { label: 'AI分析', type: 'primary' },
+  capture: { label: '随手记', type: 'success' },
 }
 
 export const triggerTypeMap = {

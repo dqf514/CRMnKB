@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
-TaskType = Literal["follow_up", "meeting", "call", "email", "report"]
+TaskType = Literal["follow_up", "meeting", "call", "email", "report", "todo"]
 TaskPriority = Literal["high", "medium", "low"]
 TaskStatus = Literal["pending", "in_progress", "completed", "cancelled"]
 

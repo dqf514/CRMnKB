@@ -17,7 +17,7 @@ class Task(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     title: Mapped[str]
     description: Mapped[str | None] = mapped_column(Text)
-    # follow_up / meeting / call / email / report
+    # follow_up / meeting / call / email / report / todo（随手记提醒等个人待办）
     type: Mapped[str] = mapped_column(default="follow_up")
     # high / medium / low
     priority: Mapped[str] = mapped_column(default="medium")
@@ -25,7 +25,7 @@ class Task(Base):
     # pending / in_progress / completed / cancelled
     status: Mapped[str] = mapped_column(default="pending")
     ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)
-    # manual / rule / ai_analysis
+    # manual / rule / ai_analysis / capture（随手记提醒）
     source: Mapped[str] = mapped_column(default="manual")
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     completed_at: Mapped[datetime | None]
