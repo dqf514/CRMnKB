@@ -1,4 +1,18 @@
 from abc import ABC, abstractmethod
+import re
+
+_THINK_BLOCK_RE = re.compile(r"<(?:think|thinking)>.*?</(?:think|thinking)>", re.I | re.S)
+_THINK_TAIL_RE = re.compile(r"<(?:think|thinking)>.*$", re.I | re.S)
+
+
+def strip_think(text: str | None) -> str:
+    """剥离推理型模型输出中的 <think>…</think> / <thinking>…</thinking> 思考块并去首尾空白。
+
+    落库前必过的一道护栏：MiniMax / DeepSeek-R1 等推理模型会把思维链混在正文里返回，
+    不剥就会污染 AI 简报、跟进摘要、客户画像等持久化字段。
+    未闭合的尾部 <think>（输出被截断）也一并剥掉。纯函数。
+    """
+    return _THINK_TAIL_RE.sub("", _THINK_BLOCK_RE.sub("", text or "")).strip()
 
 
 class LLMService(ABC):

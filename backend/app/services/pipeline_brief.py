@@ -13,7 +13,7 @@ from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.models.opportunity import Opportunity
 from app.models.task import Task
-from app.services.llm import resolve_chat_llm
+from app.services.llm import resolve_chat_llm, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ async def generate_brief(customer_id: int) -> None:
             prompt = build_brief_prompt(customer, followups, opportunities, tasks)
             chat_llm = await resolve_chat_llm(caller="pipeline_brief", tenant_id=customer.tenant_id)
             brief = await chat_llm.chat(prompt)
-            customer.ai_brief = brief.strip()
+            customer.ai_brief = strip_think(brief)
             # ai_brief_at 为 TIMESTAMP（不带时区），写 naive UTC
             customer.ai_brief_at = datetime.now(timezone.utc).replace(tzinfo=None)
             await session.commit()

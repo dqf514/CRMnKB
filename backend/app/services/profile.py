@@ -10,7 +10,7 @@ from app.models.document import KnowledgeDocument
 from app.models.follow_up import FollowUpRecord
 from app.models.knowledge_base import KnowledgeBase
 from app.models.opportunity import Opportunity
-from app.services.llm import resolve_chat_llm
+from app.services.llm import resolve_chat_llm, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ async def generate_profile(customer_id: int) -> None:
             )
             chat_llm = await resolve_chat_llm(caller="profile", tenant_id=customer.tenant_id)
             profile = await chat_llm.chat(prompt)
-            customer.profile = profile
+            customer.profile = strip_think(profile)
             customer.profile_status = "ready"
         except Exception as exc:
             logger.warning("客户 %s 画像生成失败: %s", customer_id, exc)

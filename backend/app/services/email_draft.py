@@ -7,6 +7,7 @@
 import json
 import logging
 
+from app.services.llm import strip_think
 from app.services.report import _lang_instruction
 
 logger = logging.getLogger(__name__)
@@ -70,10 +71,10 @@ def parse_email_draft(text: str | None) -> dict:
     r"""从 LLM 输出中容错解析邮件草稿 JSON，返回 {"subject": ..., "body": ...}；失败返回 {}。纯函数。
 
     先去 Markdown 代码围栏，再用 raw_decode 从每个可能的 '{' 位置尝试解析，
-    避免贪婪正则 `\{.*\}` 在嵌套时过捕获。"""
+    避免贪婪正则 `\{.*\}` 在嵌套时过捕获。推理模型的 <think> 思考块先剥离。"""
     if not text:
         return {}
-    cleaned = text.strip()
+    cleaned = strip_think(text).strip()
     # 去代码围栏（```json ... ``` / ``` ... ```）
     if cleaned.startswith("```"):
         first_nl = cleaned.find("\n")

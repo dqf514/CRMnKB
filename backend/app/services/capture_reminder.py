@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.reminder_rule import ReminderRule
 from app.models.task import Task
 from app.models.user import User
-from app.services.llm import resolve_chat_llm
+from app.services.llm import resolve_chat_llm, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +133,7 @@ async def maybe_create_capture_reminder(
                 f"随手记文本：{text[:2000]}"
             )},
         ])
-        parsed = parse_extract_response(raw, now_local)
+        parsed = parse_extract_response(strip_think(raw), now_local)
         if parsed is None:
             return None
         # 本地 aware → naive UTC（项目约定：TIMESTAMP 列存 naive UTC）

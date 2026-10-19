@@ -89,7 +89,7 @@ npm test
 - `services/`：业务逻辑核心。重点模块：
   - `ingestion.py`：文档解析→清洗→语义切片（512 字 + 64 重叠，Markdown 标题锚定）→向量化；多模态摄入也在此。
   - `rag.py` / `chat.py`：检索管线（问题改写→混合检索 blend→Rerank 三级降级→Small2Big 扩展→阈值兜底）与 SSE 流式问答。
-  - `llm/`：LLM 抽象层（`base.py` + `api_llm.py` / `ollama_llm.py` 双实现 + `instrumented.py` + `factory.py` + `usage.py` 用量统计），模型配置 DB 优先、Key 加密。
+  - `llm/`：LLM 抽象层（`base.py` + `api_llm.py` / `ollama_llm.py` 双实现 + `instrumented.py` + `factory.py` + `usage.py` 用量统计），模型配置 DB 优先、Key 加密。`base.py` 的共享 `strip_think()`（剥离 <think>/<thinking> 思考块，含未闭合尾部）是所有 LLM 文本落库前的强制护栏——followup_hooks(ai_summary)/pipeline_brief(ai_brief)/profile(画像)/ai_tasks/parse/capture_reminder/email_draft 均已接入，新增 LLM 落库路径必须调用。
   - `skills/`：Agent 工具调用框架（`builtin.py` 联网搜索/网页抓取 + `api_skill.py` + `mcp_skill.py` + `mcp_pool.py` MCP 连接池 + `mcp_discovery.py` + `registry.py`）。
   - `mcp_server.py`：知识库 MCP server（FastMCP streamable-http，挂在 `/api/mcp`），供 dsh 基座消费。只读工具：`kb_search`（可选 `kb_ids` 参数限定检索范围，与 ACL 可读库取交集防越权）/ `kb_read_doc` / `kb_list` / `crm_list_customers`（客户全量名单+总数）/ `crm_search_customers` / `crm_get_customer` / `crm_list_followups` / `crm_list_opportunities` / `crm_list_tasks` / `crm_stats`（经营概览统计）/ `skill_list`（已启用自定义工具概要，不含 config 防泄露密钥）/ `skill_call`（通用派发：调用 skill_list 列出的任意已启用工具）/ `web_search` / `web_fetch`；审批制写工具：`crm_create_customer` / `crm_update_customer` / `crm_delete_customer` / `crm_create_opportunity` / `crm_create_task` / `crm_add_followup` / `mail_draft_create` / `skill_create_api`（AI 起草 API 工具配置——name/method/url/headers/body/parameters，批准即建 `skills` 行并启用，运行时由 `ApiSkill` 执行含 SSRF 校验；只落审批单，admin 在 Agent 审批页批准后由 `agent_approvals` 执行器落库——建/改客户走字段白名单、软删可恢复，防越权改 tenant/owner；执行失败（failed）的审批单可由 admin 经 `POST /agent-approvals/{id}/retry` 重试执行）。dsh 专用 JWT（`aud=dsh-mcp`，security.py `create_mcp_token`）鉴权；KB 工具 ACL 在工具内按 user_id 强制，CRM 工具按 tenant_id 隔离 + 客户级 ACL（`customers.is_private`：NULL/FALSE=团队共享同团队可编辑，TRUE=仅 owner+被分享者+admin；复用 `resource_permissions` 三档授权与 `permissions.py` 的 `customer_visible_clause`/`get_access_for`，团队共享默认 edit 是协作型资源的刻意设计，与文档的只读不同）。个人记忆工具（免审批，严格按 user_id 隔离）：`memory_save` / `memory_list` / `memory_search` / `memory_delete`。
   - `memory.py`：个人记忆（跨工作区长期偏好/事实）。存 `user_memories` 表（user_id + content + source[agent/manual] + chat_session_id 追溯）；每用户上限 200 条 FIFO 淘汰、单条 500 字、相同内容去重；agent 新会话（session/new）时把最近 30 条注入 prompt（`<user-memory>` 块，仅注入发给 dsh 的文本，落库仍是用户原始问题；resume 会话不重复注入）；个人中心「我的记忆」页可查看/编辑/删除/清空（`GET/POST/PUT/DELETE /auth/memories`）。
@@ -131,6 +131,7 @@ dsh（DeepSeek Harness）作为 Agent 运行时被 FastAPI 内嵌管理：**单�
 
 - **没有 Alembic**。首次启动 `init_db()`（`backend/app/database.py`）自动 `create_all` 建表 + 创建 pgvector/pg_trgm 扩展 + HNSW/GIN 索引，并写种子数据（默认租户 + 管理员 `admin / admin123` + 三个系统角色 + 默认团队）。
 - 存量库升级走**幂等迁移**：在 `init_db()` 里追加 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` 等语句（已有大量先例）。改模型字段时新库由 create_all 覆盖，老库必须在这里补幂等 ALTER，两边都要考虑。
+- 存量**数据修复**也走 init_db 幂等任务：`_cleanup_think_artifacts()` 每次启动清洗早期未剥离 `<think>` 思考块即落库的 customers.ai_brief / customers.profile / follow_up_records.ai_summary（剥空置 NULL），并删除 AI 待办抽取占位标题（"待办标题"等）垃圾任务——服务器 git pull 重启即自愈，无需手工脚本。
 - 向量维度由 `EMBEDDING_DIM` 配置（默认 1024，对应 bge-m3），换嵌入模型要注意维度一致。
 
 ## 代码风格约定

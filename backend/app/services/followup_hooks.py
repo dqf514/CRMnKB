@@ -14,7 +14,7 @@ from app.database import AsyncSessionLocal
 from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.services.ai_tasks import extract_and_create_tasks
-from app.services.llm import resolve_chat_llm
+from app.services.llm import resolve_chat_llm, strip_think
 from app.services.pipeline_brief import generate_brief
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ async def generate_ai_summary(record_id: int) -> None:
                     }
                 ]
             )
-            record.ai_summary = summary.strip()
+            record.ai_summary = strip_think(summary)
             await session.commit()
         except Exception as exc:
             logger.warning("跟进记录 %s AI 总结生成失败（忽略）: %s", record_id, exc)

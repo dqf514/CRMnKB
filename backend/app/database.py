@@ -22,6 +22,41 @@ async def get_db():
         yield session
 
 
+async def _cleanup_think_artifacts(session: AsyncSession) -> None:
+    """清理早期版本未剥离 <think> 思考块即落库的脏数据（幂等，每次启动跑一遍）。
+
+    - customers.ai_brief / customers.profile / follow_up_records.ai_summary：
+      含 <think 的行用共享 strip_think 清洗，剥空则置 NULL
+    - tasks：删掉 AI 待办抽取把 Prompt 示例占位（"待办标题"）当真实事项建出的垃圾任务
+    """
+    from app.models.customer import Customer
+    from app.models.follow_up import FollowUpRecord
+    from app.models.task import Task
+    from app.services.llm import strip_think
+
+    fixed = 0
+    for model, col_name in (
+        (Customer, "ai_brief"),
+        (Customer, "profile"),
+        (FollowUpRecord, "ai_summary"),
+    ):
+        col = getattr(model, col_name)
+        rows = (await session.execute(select(model).where(col.like("%<think%")))).scalars().all()
+        for row in rows:
+            cleaned = strip_think(getattr(row, col_name))
+            setattr(row, col_name, cleaned or None)
+            fixed += 1
+    deleted = await session.execute(
+        text(
+            "DELETE FROM tasks WHERE source IN ('ai_analysis', 'capture')"
+            " AND title IN ('待办标题', '待办事项', 'title')"
+        )
+    )
+    await session.commit()
+    if fixed or deleted.rowcount:
+        logger.info("think 脏数据清理：清洗 %s 行文本，删除 %s 条占位任务", fixed, deleted.rowcount)
+
+
 async def init_db() -> None:
     """创建 pgvector 扩展与全部表，并写入种子数据。"""
     from app.models import Base  # noqa: F401  确保所有模型已注册
@@ -321,6 +356,9 @@ async def init_db() -> None:
         await session.commit()
 
     async with AsyncSessionLocal() as session:
+        # 幂等数据修复：早期版本未剥离 <think> 思考块即落库，启动时清洗存量
+        # （服务器 git pull 重启后自动生效，无需手工脚本）
+        await _cleanup_think_artifacts(session)
         tenant_count = await session.scalar(select(func.count()).select_from(Tenant))
         if tenant_count:
             # 存量库：角色体系种子 + 迁移（幂等）：三系统角色 / 默认团队收纳存量用户 / role='user'→'member'

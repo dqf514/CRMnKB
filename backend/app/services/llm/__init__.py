@@ -1,4 +1,4 @@
-from app.services.llm.base import LLMService  # noqa: F401
+from app.services.llm.base import LLMService, strip_think  # noqa: F401
 from app.services.llm.factory import (  # noqa: F401
     get_chat_llm,
     get_embed_llm,

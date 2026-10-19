@@ -7,7 +7,7 @@ from app.database import AsyncSessionLocal
 from app.models.customer import Customer
 from app.models.follow_up import FollowUpRecord
 from app.models.task import Task
-from app.services.llm import resolve_chat_llm
+from app.services.llm import resolve_chat_llm, strip_think
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,11 @@ def parse_todos(text: str | None) -> list[dict]:
     for item in data:
         if not isinstance(item, dict) or not item.get("title"):
             continue
-        todo = {"title": str(item["title"])[:200]}
+        title = str(item["title"]).strip()
+        # 过滤模型照搬 Prompt 示例的占位标题（"待办标题" 这类不是真实待办）
+        if title in ("待办标题", "title", "待办事项"):
+            continue
+        todo = {"title": title[:200]}
         if item.get("priority") in VALID_PRIORITIES:
             todo["priority"] = item["priority"]
         due = item.get("due_date")
@@ -83,7 +87,7 @@ async def extract_and_create_tasks(record_id: int) -> None:
         except Exception as exc:
             logger.warning("跟进记录 %s 待办提取失败（忽略）: %s", record_id, exc)
             return
-        todos = parse_todos(raw)
+        todos = parse_todos(strip_think(raw))
         if not todos:
             return
         for todo in todos:
