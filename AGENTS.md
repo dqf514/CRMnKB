@@ -101,7 +101,7 @@ npm test
 - `models/`：30+ 张表（resource_permissions / document_versions / login_attempts / brand_settings / chunk_questions / rag_query_log / workflow_run 等）。
 - `core/`：`security.py`（密码哈希、JWT）、`crypto.py`（API Key 加密）、`observability.py`（request-id contextvars + 日志过滤器、纯 ASGI 请求指标中间件、手写 Prometheus 文本输出——不引入第三方结构化日志/metrics 库）。
 - `config.py`：pydantic-settings，读 `backend/.env`，全部配置项有默认值与中文注释；新增配置项加到这里。注意它会在 import playwright 之前设置 `PLAYWRIGHT_BROWSERS_PATH` 指向 `backend/data/ms-playwright`。
-- `main.py`：lifespan 里启动三个后台 asyncio 任务——提醒/工作流周期调度（`_reminder_loop`）、系统告警检查（`_alert_loop`）、启动恢复（重排滞留 processing 文档）；关闭时清理 MCP 连接池、dsh ACP 进程与 LLM HTTP 客户端池（`api_llm.close_http_clients`）。未捕获异常统一记 `error_logs` 表并返回 500。`/health` 含 DB ping（不可达返回 503）；`/metrics`（免鉴权，同 /health 面向内网）输出 Prometheus 文本：请求计数/延迟直方图（按方法+归一化路径标签）+ 进程 uptime + db_up。每个请求经 `ObservabilityMiddleware` 生成/透传 `X-Request-ID`（响应头回写），日志带 request_id 字段。
+- `main.py`：lifespan 里启动三个后台 asyncio 任务——提醒/工作流周期调度（`_reminder_loop`）、系统告警检查（`_alert_loop`）、启动恢复（重排滞留 processing 文档）；解析并发互斥用 `ingestion.py` 的 DB 级租约（`doc_metadata.processing_lease`，1h 过期——注意租约 SQL 的参数必须显式 CAST / 传 datetime 实例，asyncpg 对 jsonb_build_object 裸参数与 ISO 字符串都会报错）；卡死文档前端可「重试」（租约新鲜需 force）/「停止」（`POST /kbs/{kb}/documents/{doc}/stop`，置 failed 清租约，不再被恢复重排）；关闭时清理 MCP 连接池、dsh ACP 进程与 LLM HTTP 客户端池（`api_llm.close_http_clients`）。未捕获异常统一记 `error_logs` 表并返回 500。`/health` 含 DB ping（不可达返回 503）；`/metrics`（免鉴权，同 /health 面向内网）输出 Prometheus 文本：请求计数/延迟直方图（按方法+归一化路径标签）+ 进程 uptime + db_up。每个请求经 `ObservabilityMiddleware` 生成/透传 `X-Request-ID`（响应头回写），日志带 request_id 字段。
 
 ## dsh agent 基座（阶段 2：ACP 接入面）
 

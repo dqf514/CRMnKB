@@ -1077,8 +1077,10 @@ async def _acquire_parse_lease(session, doc_id: int) -> bool:
     now = datetime.now(timezone.utc)
     res = await session.execute(
         sql_text(
+            # 参数必须显式 CAST：jsonb_build_object 是 VARIADIC "any"，asyncpg 无法推断
+            # 裸参数类型（报 IndeterminateDatatypeError: could not determine data type of parameter）
             "UPDATE knowledge_documents "
-            "SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(:k, :ts) "
+            "SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(CAST(:k AS text), CAST(:ts AS text)) "
             "WHERE id = :id "
             "AND (metadata->>:k IS NULL OR (metadata->>:k)::timestamptz < :stale)"
         ),
@@ -1086,7 +1088,8 @@ async def _acquire_parse_lease(session, doc_id: int) -> bool:
             "k": _PARSE_LEASE_KEY,
             "ts": now.isoformat(),
             "id": doc_id,
-            "stale": (now - timedelta(seconds=_PARSE_LEASE_SECONDS)).isoformat(),
+            # timestamptz 比较参数必须传 datetime 实例：asyncpg 拒绝 ISO 字符串
+            "stale": now - timedelta(seconds=_PARSE_LEASE_SECONDS),
         },
     )
     await session.commit()
@@ -1096,10 +1099,24 @@ async def _acquire_parse_lease(session, doc_id: int) -> bool:
 async def _release_parse_lease(session, doc_id: int) -> None:
     """释放解析租约（移除 metadata 键）。"""
     await session.execute(
-        sql_text("UPDATE knowledge_documents SET metadata = metadata - :k WHERE id = :id"),
+        sql_text("UPDATE knowledge_documents SET metadata = metadata - CAST(:k AS text) WHERE id = :id"),
         {"k": _PARSE_LEASE_KEY, "id": doc_id},
     )
     await session.commit()
+
+
+def parse_lease_fresh(doc: KnowledgeDocument) -> bool:
+    """解析租约是否仍新鲜（True=大概率有解析任务在飞，强制重试/停止前需用户确认）。纯函数。"""
+    raw = (doc.doc_metadata or {}).get(_PARSE_LEASE_KEY)
+    if not raw:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts > datetime.now(timezone.utc) - timedelta(seconds=_PARSE_LEASE_SECONDS)
 
 
 async def process_document(doc_id: int) -> None:

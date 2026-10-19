@@ -135,3 +135,36 @@ async def test_prepare_default_searches_all(monkeypatch):
 
     await chat_module._prepare(None, 1, "问题", [])
     assert captured["kb_ids"] is None  # 缺省检索全部知识库
+
+
+# ---------- 解析租约新鲜度（卡死判定） ----------
+
+class _DocStub:
+    def __init__(self, meta):
+        self.doc_metadata = meta
+
+
+def test_parse_lease_fresh_when_just_taken():
+    from datetime import datetime, timezone
+
+    from app.services.ingestion import parse_lease_fresh
+
+    doc = _DocStub({"processing_lease": datetime.now(timezone.utc).isoformat()})
+    assert parse_lease_fresh(doc) is True
+
+
+def test_parse_lease_stale_after_expiry():
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.ingestion import parse_lease_fresh
+
+    old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    assert parse_lease_fresh(_DocStub({"processing_lease": old})) is False
+
+
+def test_parse_lease_absent_or_invalid():
+    from app.services.ingestion import parse_lease_fresh
+
+    assert parse_lease_fresh(_DocStub(None)) is False
+    assert parse_lease_fresh(_DocStub({})) is False
+    assert parse_lease_fresh(_DocStub({"processing_lease": "not-a-date"})) is False

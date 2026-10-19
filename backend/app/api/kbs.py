@@ -27,6 +27,7 @@ from app.schemas.kb import (
 from app.services.audit import record_audit
 from app.services.ingestion import (
     is_supported,
+    parse_lease_fresh,
     process_document,
     vision_review_document as run_vision_review,
 )
@@ -212,22 +213,58 @@ async def reparse_kb_document(
     kb_id: int,
     doc_id: int,
     background_tasks: BackgroundTasks,
+    force: bool = Query(False, description="强制重试：清除在飞的解析租约后重排（卡死文档用）"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """重试解析失败/卡死的文档：重置为 processing 并重新排队（process_document 幂等清旧切片）。"""
+    """重试解析失败/卡死的文档：重置为 processing 并重新排队（process_document 幂等清旧切片）。
+
+    processing 状态：租约缺失/已过期（进程重启残留）直接允许重排；
+    租约新鲜（大概率真有解析在飞）需 force=true 才会清租约强制重排。"""
     await _get_kb_or_404(db, user, kb_id, "edit")
     doc = await db.get(KnowledgeDocument, doc_id)
     if doc is None or doc.kb_id != kb_id:
         raise HTTPException(status_code=404, detail="文档不存在")
     if doc.status == "processing":
-        raise HTTPException(status_code=409, detail="文档正在处理中")
+        if parse_lease_fresh(doc) and not force:
+            raise HTTPException(status_code=409, detail="文档正在解析中（如确认已卡死，可强制重试）")
+        # 卡死/租约过期/强制：清掉残留租约再重排
+        meta = dict(doc.doc_metadata or {})
+        meta.pop("processing_lease", None)
+        doc.doc_metadata = meta
     if not is_supported(doc.file_name):
         raise HTTPException(status_code=400, detail="该格式暂不支持解析")
     doc.status = "processing"
-    record_audit(db, user, "reparse", "document", doc.id, {"title": doc.title})
+    record_audit(db, user, "reparse", "document", doc.id, {"title": doc.title, "force": force})
     await db.commit()
     background_tasks.add_task(process_document, doc_id)
+    return {"ok": True}
+
+
+@router.post("/{kb_id}/documents/{doc_id}/stop")
+async def stop_kb_document(
+    kb_id: int,
+    doc_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """手动停止卡死的解析：置为 failed 并清租约，不再被启动恢复重排。
+
+    若解析任务其实仍在飞，它完成后会正常覆盖为 ready（无害）；
+    真正卡死（进程已死/任务丢失）的文档由此脱离处理中状态，可再重试。"""
+    await _get_kb_or_404(db, user, kb_id, "edit")
+    doc = await db.get(KnowledgeDocument, doc_id)
+    if doc is None or doc.kb_id != kb_id:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if doc.status != "processing":
+        raise HTTPException(status_code=409, detail="仅处理中的文档可停止")
+    meta = dict(doc.doc_metadata or {})
+    meta.pop("processing_lease", None)
+    meta["error"] = "已手动停止"
+    doc.doc_metadata = meta
+    doc.status = "failed"
+    record_audit(db, user, "update", "document", doc.id, {"action": "stop_parse", "title": doc.title})
+    await db.commit()
     return {"ok": True}
 
 

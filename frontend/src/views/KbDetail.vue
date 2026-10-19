@@ -42,14 +42,17 @@
         <el-table-column label="关联时间" width="160">
           <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right" align="right" header-align="right">
+        <el-table-column label="操作" width="250" fixed="right" align="right" header-align="right">
           <template #default="{ row }">
             <el-tooltip v-if="!row.file_id" content="迁移旧数据，无文件实体，暂不支持预览" placement="top">
               <span><el-button link disabled :icon="View" /></span>
             </el-tooltip>
             <el-tooltip v-else content="预览" placement="top"><el-button link :icon="View" @click="openPreview(row)" /></el-tooltip>
-            <el-tooltip v-if="row.status === 'failed' || row.status === 'unsupported'" :content="row.status === 'unsupported' ? '解析' : '重试'" placement="top">
+            <el-tooltip v-if="row.status === 'failed' || row.status === 'unsupported' || row.status === 'processing'" :content="row.status === 'processing' ? '重试（处理中卡死时强制重排）' : (row.status === 'unsupported' ? '解析' : '重试')" placement="top">
               <el-button link type="warning" :icon="RefreshRight" @click="handleReparse(row)" />
+            </el-tooltip>
+            <el-tooltip v-if="row.status === 'processing'" content="停止（标记为失败，不再自动重排）" placement="top">
+              <el-button link type="danger" :icon="CircleClose" @click="handleStop(row)" />
             </el-tooltip>
             <el-tooltip v-if="row.status === 'ready' && ['ocr', 'image_describe', 'vision_ocr'].includes(row.processing_method)" :content="row.vision_reviewed_at ? '已复核，可再次复核' : '视觉复核（用视觉模型重新转录并更新切片）'" placement="top">
               <el-button link type="warning" :loading="reviewingIds.includes(row.id)" :icon="MagicStick" @click="handleVisionReview(row)" />
@@ -202,10 +205,10 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowLeft, Plus, Search, Loading, Aim, Edit, Delete, View, RefreshRight, MagicStick, List, Clock } from '@element-plus/icons-vue'
+import { ArrowLeft, Plus, Search, Loading, Aim, Edit, Delete, View, RefreshRight, MagicStick, List, Clock, CircleClose } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getKbs, getKbDocuments, associateKbDocuments, removeKbDocument, reparseKbDocument, visionReviewKbDocument, getKbDocumentChunks,
+  getKbs, getKbDocuments, associateKbDocuments, removeKbDocument, reparseKbDocument, stopKbDocument, visionReviewKbDocument, getKbDocumentChunks,
   getLibraryTree, getLibraryFiles, hitTestKb, getDocVersions, getDocVersion, restoreDocVersion,
   updateKb, deleteKb,
 } from '../api'
@@ -413,8 +416,42 @@ async function handleRemove(row) {
 }
 
 async function handleReparse(row) {
-  await reparseKbDocument(kbId, row.id)
-  ElMessage.success('已重新排队解析')
+  // 处理中的文档可能真在解析（租约新鲜）：先确认，再强制重排
+  let force = false
+  if (row.status === 'processing') {
+    const ok = await confirmDanger(
+      `「${row.title}」正处于处理中。若确认已卡死（长时间无进度），可强制重试——将清除残留解析状态并重新排队。是否继续？`,
+      '强制重试'
+    )
+    if (!ok) return
+    force = true
+  }
+  try {
+    await reparseKbDocument(kbId, row.id, force)
+    ElMessage.success('已重新排队解析')
+    loadDocs()
+  } catch (e) {
+    // 409：租约新鲜（真有解析在飞），提示稍后或强制
+    if (e?.response?.status === 409) {
+      const retry = await confirmDanger('该文档正在解析中。如确认已卡死，可强制重试。是否强制？', '解析进行中')
+      if (retry) {
+        await reparseKbDocument(kbId, row.id, true)
+        ElMessage.success('已强制重新排队解析')
+        loadDocs()
+      }
+    }
+  }
+}
+
+// 停止卡死的解析：标记为失败并清除租约，启动恢复不再自动重排
+async function handleStop(row) {
+  const ok = await confirmDanger(
+    `确定停止「${row.title}」的解析吗？文档将标记为失败，之后可随时重试。`,
+    '停止解析'
+  )
+  if (!ok) return
+  await stopKbDocument(kbId, row.id)
+  ElMessage.success('已停止')
   loadDocs()
 }
 
