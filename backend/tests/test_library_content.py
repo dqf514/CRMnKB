@@ -156,3 +156,63 @@ async def test_content_404_cross_tenant(client, tmp_path):
 async def test_content_requires_auth(client):
     resp = await client.get("/api/v1/library/files/1/content")
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# chunks 接口（不支持在线预览格式的切片预览）
+# ---------------------------------------------------------------------------
+
+class _ExecResult:
+    """模拟 sqlalchemy Result：按需提供 scalar_one_or_none / all。"""
+
+    def __init__(self, scalar=None, rows=None):
+        self._scalar = scalar
+        self._rows = rows or []
+
+    def scalar_one_or_none(self):
+        return self._scalar
+
+    def all(self):
+        return self._rows
+
+
+class _FakeChunkSession(_FakeSession):
+    def __init__(self, file=None, doc_id=None, chunk_rows=None):
+        super().__init__(file)
+        self._doc_id = doc_id
+        self._chunk_rows = chunk_rows or []
+
+    async def execute(self, stmt, *args, **kwargs):
+        # 第一次查询取文档 id，第二次取切片行
+        if not hasattr(self, "_called"):
+            self._called = True
+            return _ExecResult(scalar=self._doc_id)
+        return _ExecResult(rows=self._chunk_rows)
+
+
+async def test_chunks_200(client, tmp_path):
+    file = _make_file(tmp_path, name="邮件.msg")
+    db = _FakeChunkSession(file, doc_id=10, chunk_rows=[(0, "第一块"), (1, "第二块")])
+    _override(db)
+    resp = await client.get("/api/v1/library/files/1/chunks")
+    assert resp.status_code == 200
+    assert resp.json() == {"chunks": [{"index": 0, "content": "第一块"}, {"index": 1, "content": "第二块"}]}
+
+
+async def test_chunks_empty_when_no_parsed_doc(client, tmp_path):
+    file = _make_file(tmp_path, name="邮件.msg")
+    _override(_FakeChunkSession(file, doc_id=None))
+    resp = await client.get("/api/v1/library/files/1/chunks")
+    assert resp.status_code == 200
+    assert resp.json() == {"chunks": []}
+
+
+async def test_chunks_404_record_not_found(client):
+    _override(_FakeChunkSession(None))
+    resp = await client.get("/api/v1/library/files/999/chunks")
+    assert resp.status_code == 404
+
+
+async def test_chunks_requires_auth(client):
+    resp = await client.get("/api/v1/library/files/1/chunks")
+    assert resp.status_code == 401

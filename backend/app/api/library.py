@@ -25,6 +25,7 @@ from app.api.deps import get_current_user, get_current_user_with_query_token, ge
 from app.config import settings
 from app.core.security import create_file_token
 from app.models.customer import Customer
+from app.models.chunk import DocumentChunk
 from app.models.document import KnowledgeDocument
 from app.models.knowledge_base import KnowledgeBase
 from app.models.library_file import LibraryFile
@@ -938,6 +939,43 @@ async def preview_png(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"图片转换失败: {str(exc)[:200]}")
     return Response(content=data, media_type="image/png")
+
+
+@router.get("/files/{file_id}/chunks")
+async def file_chunks(
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """文件解析切片预览：供不支持在线预览的格式（如 .msg）展示已解析的正文内容。
+
+    同一文件可能关联多个知识库（各自独立切片、内容相同），取切片数最多的文档返回，
+    最多返回 500 个切片兜底。
+    """
+    await _get_file_or_404(db, user, file_id, "read")
+    doc_id = (
+        await db.execute(
+            select(KnowledgeDocument.id)
+            .where(
+                KnowledgeDocument.file_id == file_id,
+                KnowledgeDocument.tenant_id == user.tenant_id,
+                KnowledgeDocument.chunk_count > 0,
+            )
+            .order_by(KnowledgeDocument.chunk_count.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if doc_id is None:
+        return {"chunks": []}
+    rows = (
+        await db.execute(
+            select(DocumentChunk.chunk_index, DocumentChunk.content)
+            .where(DocumentChunk.document_id == doc_id)
+            .order_by(DocumentChunk.chunk_index)
+            .limit(500)
+        )
+    ).all()
+    return {"chunks": [{"index": i, "content": c} for i, c in rows]}
 
 
 @router.get("/files/{file_id}/token")

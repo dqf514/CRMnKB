@@ -72,7 +72,20 @@
         </template>
         <!-- Word -->
         <div v-else-if="kind === 'word'" class="fp-doc word-body" v-html="wordHtml"></div>
-        <!-- 不支持 -->
+        <!-- 不支持在线预览：有解析切片则展示切片内容 -->
+        <div v-else-if="chunks.length" class="fp-doc fp-chunks">
+          <el-alert
+            type="info"
+            :closable="false"
+            title="该格式不支持在线预览，以下为已解析的切片内容"
+            style="margin-bottom: 10px"
+          />
+          <div v-for="c in chunks" :key="c.index" class="fp-chunk">
+            <div class="fp-chunk-no">切片 {{ c.index + 1 }}</div>
+            <pre class="fp-text">{{ c.content }}</pre>
+          </div>
+        </div>
+        <!-- 不支持且无切片 -->
         <div v-else class="fp-unsupported">
           <el-icon :size="44" color="var(--app-ink-2)"><Document /></el-icon>
           <p>该格式暂不支持在线预览</p>
@@ -94,7 +107,7 @@ import * as mammoth from 'mammoth/mammoth.browser'
 import * as XLSX from 'xlsx'
 import {
   getLibraryFileContent, getFileContentToken, updateLibraryFile, deleteLibraryFile,
-  getLibraryFilePreviewText, getLibraryFilePreviewPng,
+  getLibraryFilePreviewText, getLibraryFilePreviewPng, getLibraryFileChunks,
 } from '../api'
 import { renderMarkdown } from '../utils/markdown'
 import { previewKind, TEXT_PREVIEW_LIMIT } from '../utils/filePreview'
@@ -148,6 +161,8 @@ const wordHtml = ref('')
 const excelSheets = ref([])  // [{name, html}]
 const excelActive = ref('')
 const officeText = ref('')
+// 不支持在线预览的格式：已解析的切片内容（如 .msg 邮件）
+const chunks = ref([])
 
 const excelHtml = computed(() =>
   excelSheets.value.find((s) => s.name === excelActive.value)?.html || excelSheets.value[0]?.html || ''
@@ -192,6 +207,12 @@ async function load() {
     if (kind.value === 'office-text') {
       const res = await getLibraryFilePreviewText(props.file.id)
       officeText.value = res.text || '（未提取到文本内容）'
+      return
+    }
+    // 不支持在线预览的格式：若有解析切片（如 .msg 邮件已解析入库），直接展示切片内容
+    if (kind.value === 'none') {
+      const res = await getLibraryFileChunks(props.file.id)
+      chunks.value = res?.chunks || []
       return
     }
     const blob = await getLibraryFileContent(props.file.id)
@@ -239,6 +260,7 @@ function cleanup() {
   excelSheets.value = []
   excelActive.value = ''
   officeText.value = ''
+  chunks.value = []
   error.value = ''
   kind.value = 'none'
 }
@@ -335,6 +357,23 @@ async function handleDownload() {
   word-break: break-all;
   max-height: 72vh;
   overflow: auto;
+}
+/* 切片预览（不支持在线预览格式的降级展示） */
+.fp-chunks {
+  max-height: 72vh;
+  overflow-y: auto;
+}
+.fp-chunk {
+  margin-bottom: 12px;
+}
+.fp-chunk-no {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--app-ink-2);
+}
+.fp-chunks .fp-text {
+  max-height: none;
 }
 .fp-unsupported {
   display: flex;
