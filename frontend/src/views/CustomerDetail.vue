@@ -97,34 +97,106 @@
         </div>
       </section>
 
-      <!-- 跟进记录 -->
+      <!-- 客户画像：整列展示 -->
       <section class="panel">
         <header class="panel-head">
-          <span class="panel-title">跟进记录<b class="count">{{ followups.length }}</b></span>
-          <el-button size="small" type="primary" plain :icon="Plus" @click="openFollowupDialog">新增跟进</el-button>
+          <span class="panel-title">客户画像</span>
+          <span class="panel-tools">
+            <span v-if="profile.status === 'ready' && profile.updated_at" class="panel-note">{{ formatDateTime(profile.updated_at) }}</span>
+            <el-button
+              v-if="profile.status === 'ready' || profile.status === 'failed'"
+              size="small"
+              text
+              :icon="Refresh"
+              :loading="generating"
+              @click="handleGenerateProfile"
+            >重新生成</el-button>
+          </span>
         </header>
-        <div class="panel-body">
-          <el-timeline v-if="followups.length" class="timeline">
-            <el-timeline-item
-              v-for="f in followups"
-              :key="f.id"
-              :timestamp="formatDateTime(f.created_at)"
-              placement="top"
-            >
-              <el-tag size="small" :type="enumTagType(followupTypeMap, f.type)" style="margin-right: 8px">
-                {{ enumLabel(followupTypeMap, f.type) }}
-              </el-tag>
-              <div class="followup-content">{{ f.content }}</div>
-              <div v-if="f.next_step" class="next-step">下一步：{{ f.next_step }}</div>
-              <div v-if="f.ai_summary" class="ai-summary">AI 摘要：{{ f.ai_summary }}</div>
-            </el-timeline-item>
-          </el-timeline>
-          <div v-else class="empty-line">暂无跟进记录，点右上角「新增跟进」记下第一次接触。</div>
+        <div class="panel-body" v-loading="profileLoading">
+          <div v-if="profile.status === 'idle'" class="empty-line">
+            还没有画像。
+            <el-button size="small" type="primary" plain :loading="generating" @click="handleGenerateProfile">生成画像</el-button>
+          </div>
+          <div v-else-if="profile.status === 'generating'" class="empty-line">
+            <el-icon class="is-loading" :size="14"><Loading /></el-icon>
+            AI 正在基于客户资料、跟进记录与文档生成画像…
+          </div>
+          <el-alert
+            v-else-if="profile.status === 'failed'"
+            type="error"
+            :closable="false"
+            title="画像生成失败"
+            :description="profile.error || '可能是 AI 服务未配置或暂不可用，其他功能不受影响。'"
+          />
+          <div v-else-if="profile.status === 'ready'" class="markdown-body compact-md" v-html="renderMarkdown(profile.profile)"></div>
         </div>
       </section>
 
-      <!-- 商机 + 待办 -->
+      <!-- 客户文档：整列展示 -->
+      <section class="panel">
+        <header class="panel-head">
+          <span class="panel-title">客户文档<b class="count">{{ filesTotal }}</b></span>
+          <el-button size="small" type="primary" plain :icon="Upload" @click="docUploadDialog = true">上传</el-button>
+        </header>
+        <div class="panel-body" v-loading="filesLoading">
+          <div v-for="row in customerFiles" :key="row.id" class="doc-row">
+            <el-link
+              type="primary"
+              :underline="false"
+              class="doc-name"
+              :title="`${row.file_name} · ${formatDateTime(row.created_at)} · ${row.supported ? '可解析' : '仅存储'}`"
+              @click="openPreview(row)"
+            >{{ row.file_name }}</el-link>
+            <el-tag v-if="row.category" size="small" :type="docCategoryStore.tagType(row.category)" effect="plain">
+              {{ docCategoryStore.labelOf(row.category) }}
+            </el-tag>
+            <span class="doc-size">{{ formatFileSize(row.file_size) }}</span>
+            <el-button link type="success" size="small" @click="openAssoc(row)">关联</el-button>
+          </div>
+          <div v-if="!filesLoading && !customerFiles.length" class="empty-line">
+            暂无文档。上传后图片与音视频将由 AI 自动识别转写入库。
+          </div>
+        </div>
+        <footer v-if="filesTotal > filesQuery.page_size" class="panel-foot">
+          <el-pagination
+            v-model:current-page="filesQuery.page"
+            :page-size="filesQuery.page_size"
+            :total="filesTotal"
+            layout="prev, pager, next"
+            small
+            @current-change="loadCustomerFiles"
+          />
+        </footer>
+      </section>
+
+      <!-- 跟进 + 商机 + 待办：第四列纵向堆叠 -->
       <div class="panel-stack">
+        <section class="panel">
+          <header class="panel-head">
+            <span class="panel-title">跟进记录<b class="count">{{ followups.length }}</b></span>
+            <el-button size="small" type="primary" plain :icon="Plus" @click="openFollowupDialog">新增跟进</el-button>
+          </header>
+          <div class="panel-body">
+            <el-timeline v-if="followups.length" class="timeline">
+              <el-timeline-item
+                v-for="f in followups"
+                :key="f.id"
+                :timestamp="formatDateTime(f.created_at)"
+                placement="top"
+              >
+                <el-tag size="small" :type="enumTagType(followupTypeMap, f.type)" style="margin-right: 8px">
+                  {{ enumLabel(followupTypeMap, f.type) }}
+                </el-tag>
+                <div class="followup-content">{{ f.content }}</div>
+                <div v-if="f.next_step" class="next-step">下一步：{{ f.next_step }}</div>
+                <div v-if="f.ai_summary" class="ai-summary">AI 摘要：{{ f.ai_summary }}</div>
+              </el-timeline-item>
+            </el-timeline>
+            <div v-else class="empty-line">暂无跟进记录，点右上角「新增跟进」记下第一次接触。</div>
+          </div>
+        </section>
+
         <section class="panel">
           <header class="panel-head">
             <span class="panel-title">商机<b class="count">{{ opportunities.length }}</b></span>
