@@ -152,7 +152,6 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
 import { Check, Camera, Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { confirmDanger } from '../utils/confirmDanger'
@@ -162,7 +161,6 @@ import { useAuthStore } from '../stores/auth'
 import { useThemeStore, ACCENTS, FONT_SIZES } from '../stores/theme'
 import { updateProfile, updatePassword, getMe, uploadAvatar, getMemories, addMemory, updateMemory, deleteMemory, clearMemories } from '../api'
 
-const router = useRouter()
 const authStore = useAuthStore()
 const themeStore = useThemeStore()
 
@@ -310,7 +308,8 @@ async function savePassword() {
     await updatePassword({ old_password: pwdForm.old_password, new_password: pwdForm.new_password })
     ElMessage.success('密码已修改，请重新登录')
     authStore.logout()
-    router.push('/login')
+    // 整页跳转，彻底重置各 store 的内存状态（同 AppLayout 退出登录）
+    window.location.href = '/login'
   } finally {
     pwdSaving.value = false
   }

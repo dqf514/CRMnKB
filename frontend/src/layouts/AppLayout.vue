@@ -569,7 +569,9 @@ async function handleCommand(cmd) {
     const ok = await confirmDanger('确定退出登录吗？', '提示')
     if (!ok) return
     authStore.logout()
-    router.push('/login')
+    // 整页跳转（而非 router.push）：彻底重置 Pinia 各 store 的内存状态，
+    // 避免上一账号的工作区列表等缓存遗留给下一账号（点了会 403）
+    window.location.href = '/login'
   }
 }
 

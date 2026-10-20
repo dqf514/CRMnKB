@@ -60,6 +60,11 @@ export const useAuthStore = defineStore('auth', {
       this.user = null
       localStorage.removeItem('token')
       localStorage.removeItem('user')
+      // 清掉按用户隔离的本地缓存（工作区恢复键/各工作区会话 id），
+      // 防止同一浏览器换账号登录后看到上一个账号的工作区/会话
+      Object.keys(localStorage)
+        .filter((k) => k.startsWith('studio:'))
+        .forEach((k) => localStorage.removeItem(k))
     },
   },
 })

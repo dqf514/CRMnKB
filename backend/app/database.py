@@ -184,6 +184,9 @@ async def init_db() -> None:
         await conn.execute(text("ALTER TABLE library_files ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP"))
         await conn.execute(text("ALTER TABLE library_files ADD COLUMN IF NOT EXISTS content_hash VARCHAR(64)"))
         await conn.execute(text("ALTER TABLE notebooks ADD COLUMN IF NOT EXISTS is_private BOOLEAN"))
+        # 工作区是个人工作区：存量 NULL（历史"团队可见"语义）统一收敛为私有，
+        # 团队协作走显式分享授权；否则同团队成员会看到彼此全部工作区
+        await conn.execute(text("UPDATE notebooks SET is_private = TRUE WHERE is_private IS NULL"))
         await conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS resource_type VARCHAR(20)"))
         await conn.execute(text("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS resource_id BIGINT"))
         # 提醒通知去重键（规则 id + 业务对象 id）：不用渲染后标题去重，
