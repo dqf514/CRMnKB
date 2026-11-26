@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.routing import Route
 
 from app.api import (
+    admin_agent_tools,
     admin_audit,
     admin_dsh_plugins,
     admin_errors,
@@ -247,6 +248,7 @@ app.include_router(admin_llm.router, prefix="/api/v1")
 app.include_router(admin_skills.router, prefix="/api/v1")
 app.include_router(admin_mcp.router, prefix="/api/v1")
 app.include_router(admin_dsh_plugins.router, prefix="/api/v1")
+app.include_router(admin_agent_tools.router, prefix="/api/v1")
 app.include_router(admin_system.router, prefix="/api/v1")
 app.include_router(admin_settings.router, prefix="/api/v1")
 app.include_router(notebooks.router, prefix="/api/v1")

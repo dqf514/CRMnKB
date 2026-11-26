@@ -250,6 +250,10 @@ export const toggleDshPlugin = (id, enabled) => request.put(`/api/v1/admin/dsh-p
 export const installDshPlugin = (spec) => request.post('/api/v1/admin/dsh-plugins/install', { spec }, { timeout: 600000 })
 export const removeDshCustomPlugin = (id) => request.delete(`/api/v1/admin/dsh-plugins/custom/${encodeURIComponent(id)}`)
 export const restartDsh = () => request.post('/api/v1/admin/dsh-plugins/restart')
+
+// agent 工具权限白名单（dsh 权限应答自动放行清单，system_settings 存储）
+export const getAgentToolWhitelist = () => request.get('/api/v1/admin/agent-tools')
+export const setAgentToolWhitelist = (tools) => request.put('/api/v1/admin/agent-tools', { tools })
 // PST 拆解进度（上传面板轮询）
 export const getPstProgress = (id) => request.get(`/api/v1/library/files/${id}/pst-progress`)
 export const updateLibraryFile = (id, data) => request.put(`/api/v1/library/files/${id}`, data)

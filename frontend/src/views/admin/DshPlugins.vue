@@ -1,5 +1,7 @@
 <template>
   <div>
+    <el-tabs v-model="activeTab">
+      <el-tab-pane label="插件库" name="plugins">
     <el-card>
       <div class="toolbar">
         <span class="hint">
@@ -76,6 +78,59 @@
       </el-table>
       <el-empty v-if="!loading && !loadError && !filtered.length" description="没有匹配的插件" :image-size="80" />
     </el-card>
+      </el-tab-pane>
+
+      <el-tab-pane label="工具权限" name="tools">
+    <el-card v-loading="toolLoading">
+      <div class="toolbar">
+        <span class="hint">
+          agent（dsh）调用工具时的自动放行白名单：名单内自动执行，名单外一律拒绝。保存后最长 1 分钟内全量生效。
+        </span>
+        <el-button :icon="Refresh" style="margin-left: auto" @click="loadTools">刷新</el-button>
+        <el-button type="primary" :loading="toolSaving" :disabled="!toolDirty" @click="saveTools">保存</el-button>
+      </div>
+
+      <el-alert type="warning" :closable="false" style="margin-bottom: 14px">
+        写操作（新建/修改/删除客户等）正常走「Agent 审批」链；把高危工具加入白名单等于<strong>绕开审批直接执行</strong>，请谨慎开启。
+      </el-alert>
+
+      <div v-for="group in groupedCatalog" :key="group.source" class="tool-group">
+        <div class="tool-group-title">{{ group.source }}</div>
+        <div v-for="tool in group.items" :key="group.source + '/' + tool.name" class="tool-row">
+          <div class="tool-info">
+            <span class="tool-label">{{ tool.label }}</span>
+            <span class="tool-name">{{ tool.name }}</span>
+          </div>
+          <el-tag v-if="tool.risk === 'high'" size="small" type="danger" effect="plain">高危</el-tag>
+          <el-tag v-else-if="tool.risk === 'medium'" size="small" type="warning" effect="plain">中危</el-tag>
+          <el-tag v-else size="small" type="success" effect="plain">只读</el-tag>
+          <el-switch :model-value="toolEnabled(tool.name)" @change="(val) => toggleTool(tool, val)" />
+        </div>
+      </div>
+
+      <div class="tool-group">
+        <div class="tool-group-title">自定义工具</div>
+        <div v-for="name in customTools" :key="name" class="tool-row">
+          <div class="tool-info">
+            <span class="tool-name">{{ name }}</span>
+          </div>
+          <el-tag size="small" type="info" effect="plain">自定义</el-tag>
+          <el-button link type="danger" size="small" @click="removeCustomTool(name)">移除</el-button>
+        </div>
+        <div class="tool-add">
+          <el-input
+            v-model="newToolName"
+            placeholder="工具名（字母/数字/_.-，MCP 前缀工具填 __ 末段即可）"
+            clearable
+            style="max-width: 360px"
+            @keyup.enter="addCustomTool"
+          />
+          <el-button :disabled="!newToolName.trim()" @click="addCustomTool">添加</el-button>
+        </div>
+      </div>
+    </el-card>
+      </el-tab-pane>
+    </el-tabs>
 
     <!-- 安装插件 -->
     <el-dialog v-model="installDialog" title="安装 dsh 插件" width="min(92vw, 560px)" :close-on-click-modal="false">
@@ -116,7 +171,10 @@ import { Plus, Refresh, RefreshRight, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   getDshPlugins, toggleDshPlugin, installDshPlugin, removeDshCustomPlugin, restartDsh,
+  getAgentToolWhitelist, setAgentToolWhitelist,
 } from '../../api'
+
+const activeTab = ref('plugins')
 
 const loading = ref(false)
 const loadError = ref('')
@@ -207,7 +265,105 @@ async function handleInstall() {
   }
 }
 
-onMounted(load)
+// ---- 工具权限白名单（agent 自动放行清单，整体替换保存）----
+const toolLoading = ref(false)
+const toolSaving = ref(false)
+const toolCatalog = ref([])
+const toolWhitelist = ref([])
+const toolOriginal = ref('')
+const newToolName = ref('')
+
+const toolDirty = computed(() => JSON.stringify(toolWhitelist.value) !== toolOriginal.value)
+
+const groupedCatalog = computed(() => {
+  // 按来源分组（保持 catalog 顺序）
+  const groups = []
+  const bySource = new Map()
+  for (const t of toolCatalog.value) {
+    if (!bySource.has(t.source)) {
+      const g = { source: t.source, items: [] }
+      bySource.set(t.source, g)
+      groups.push(g)
+    }
+    bySource.get(t.source).items.push(t)
+  }
+  return groups
+})
+
+const catalogNames = computed(() => new Set(toolCatalog.value.map((t) => t.name)))
+// 白名单里不在已知目录中的条目（管理员手工加的）
+const customTools = computed(() => toolWhitelist.value.filter((n) => !catalogNames.value.has(n)))
+
+function toolEnabled(name) {
+  return toolWhitelist.value.includes(name)
+}
+
+async function toggleTool(tool, enabled) {
+  if (enabled && tool.risk === 'high') {
+    const ok = await ElMessageBox.confirm(
+      `「${tool.label}（${tool.name}）」是高危工具：加入白名单后 agent 将不经审批直接执行。确认开启？`,
+      '高危工具确认',
+      { type: 'error', confirmButtonText: '仍要开启', cancelButtonText: '取消' },
+    ).then(() => true).catch(() => false)
+    if (!ok) return
+  }
+  const idx = toolWhitelist.value.indexOf(tool.name)
+  if (enabled && idx === -1) toolWhitelist.value.push(tool.name)
+  if (!enabled && idx !== -1) toolWhitelist.value.splice(idx, 1)
+}
+
+function addCustomTool() {
+  const name = newToolName.value.trim()
+  if (!name) return
+  if (!/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
+    ElMessage.error('工具名仅支持字母/数字/_.-，最长 100 字符')
+    return
+  }
+  if (toolWhitelist.value.includes(name)) {
+    ElMessage.warning('已在白名单中')
+    return
+  }
+  toolWhitelist.value.push(name)
+  newToolName.value = ''
+}
+
+function removeCustomTool(name) {
+  const idx = toolWhitelist.value.indexOf(name)
+  if (idx !== -1) toolWhitelist.value.splice(idx, 1)
+}
+
+async function loadTools() {
+  toolLoading.value = true
+  try {
+    const res = await getAgentToolWhitelist()
+    toolCatalog.value = res?.catalog || []
+    toolWhitelist.value = [...(res?.whitelist || [])]
+    toolOriginal.value = JSON.stringify(res?.whitelist || [])
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    toolLoading.value = false
+  }
+}
+
+async function saveTools() {
+  toolSaving.value = true
+  try {
+    const res = await setAgentToolWhitelist(toolWhitelist.value)
+    toolWhitelist.value = [...(res?.whitelist || [])]
+    toolOriginal.value = JSON.stringify(res?.whitelist || [])
+    ElMessage.success('白名单已保存（最长 1 分钟内全量生效）')
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    toolSaving.value = false
+  }
+}
+
+onMounted(() => {
+  load()
+  loadTools()
+})
 </script>
 
 <style scoped>
@@ -237,5 +393,46 @@ onMounted(load)
   font-size: 12px;
   white-space: pre-wrap;
   word-break: break-all;
+}
+.tool-group {
+  margin-bottom: 18px;
+}
+.tool-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-ink);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--app-border, #e4e7ed);
+}
+.tool-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 4px;
+}
+.tool-row:hover {
+  background: var(--app-bg-hover, #f5f7fa);
+  border-radius: 6px;
+}
+.tool-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.tool-label {
+  font-size: 13.5px;
+}
+.tool-name {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  color: var(--app-ink-2);
+}
+.tool-add {
+  display: flex;
+  gap: 8px;
+  padding: 7px 4px;
 }
 </style>

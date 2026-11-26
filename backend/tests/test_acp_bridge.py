@@ -20,6 +20,18 @@ def _user(uid=1, **kw):
     return SimpleNamespace(**base)
 
 
+@pytest.fixture(autouse=True)
+def _stub_auto_allow(monkeypatch):
+    """权限应答的白名单读取不连真实 DB：默认返回 DEFAULT_AUTO_ALLOW_TOOLS，
+    各用例可再 monkeypatch 覆盖。"""
+    from app.services.agent_permissions import DEFAULT_AUTO_ALLOW_TOOLS
+
+    async def _fake(_session):
+        return list(DEFAULT_AUTO_ALLOW_TOOLS)
+
+    monkeypatch.setattr(acp_bridge, "get_auto_allow_tools", _fake)
+
+
 class _FakeProc:
     def __init__(self):
         self.returncode = None

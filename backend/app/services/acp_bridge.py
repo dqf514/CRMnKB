@@ -10,8 +10,9 @@
 - 会话可跨进程恢复：session/resume + PG 会话持久化插件（dsh_session_* 两表），
   后端重启/进程崩溃后 agent 上下文不丢（阶段 1 的 SDK 不支持跨进程恢复）。
 - 权限应答：dsh 审批链经 session/request_permission 反向请求客户端——
-  mcp__kb__ 前缀下的只读白名单工具自动 allow-once，其余一律拒绝
-  （写工具/skill_call/web_search/web_fetch 不放行；写操作本就走后端
+  白名单（system_settings `agent_auto_allow_tools`，管理端「dsh 插件 → 工具权限」
+  维护，默认=知识库 MCP 只读工具）内的工具自动 allow-once，其余一律拒绝
+  （写工具/skill_call/web_search/web_fetch 默认不放行；写操作本就走后端
   agent_approvals 审批链，不经 dsh 执行）。
 
 模型路由：进程级静态 patch（patches/acp-model.yml，进程启动时按 DB 默认 chat
@@ -40,6 +41,7 @@ from app.core.security import create_mcp_token
 from app.database import AsyncSessionLocal
 from app.models.llm_model import LlmModel
 from app.models.user import User
+from app.services.agent_permissions import get_auto_allow_tools, is_auto_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -67,17 +69,11 @@ class AcpUnavailable(Exception):
 # 无超时的挂起会堵死所有 agent 请求
 _SPAWN_TIMEOUT_SECONDS = 60
 
-# session/request_permission 自动放行的只读工具白名单（mcp__kb__ 前缀下的具体工具名）。
-# 写工具（crm_create/update/delete 等）、skill_call（通用派发，有副作用）、
-# web_search/web_fetch（外发请求）不在列，一律走拒绝策略（写操作本就走后端
-# agent_approvals 审批链，不经 dsh 执行）。
-_AUTO_ALLOW_TOOLS = {
-    "kb_search", "kb_read_doc", "kb_list",
-    "crm_list_customers", "crm_search_customers", "crm_get_customer",
-    "crm_list_followups", "crm_list_opportunities", "crm_list_tasks", "crm_stats",
-    "skill_list",
-    "memory_save", "memory_list", "memory_search", "memory_delete",
-}
+# session/request_permission 自动放行的工具白名单已动态化：
+# 存 system_settings 表 key=agent_auto_allow_tools，管理端「dsh 插件 → 工具权限」维护
+# （services/agent_permissions.py）；未配置时回退默认（知识库 MCP 只读工具），行为不变。
+# 写工具/skill_call/web_search/web_fetch 默认不在列——写操作走后端 agent_approvals
+# 审批链，不允许 dsh 直接执行。
 
 
 class _ClientHandler:
@@ -85,10 +81,10 @@ class _ClientHandler:
 
     - session_update：按 session_id 分发到 run_turn 注册的订阅队列
       （pydantic 模型转 snake_case dict 后投递）。
-    - request_permission：dsh 审批链的反向请求。mcp__kb__ 前缀下的只读
-      白名单工具自动 allow-once；其余（含写工具/skill_call/web_search/
-      web_fetch）一律拒绝并记日志——写操作走后端 agent_approvals 审批链，
-      不允许 dsh 直接执行。
+    - request_permission：dsh 审批链的反向请求。按动态白名单（system_settings
+      agent_auto_allow_tools，services/agent_permissions.py，默认=知识库 MCP
+      只读工具）自动 allow-once；白名单外一律拒绝并记日志——写操作走后端
+      agent_approvals 审批链，不允许 dsh 直接执行。
     - fs/terminal 等 client 能力未声明（initialize 时 capabilities 全默认关），
       dsh 不会发起对应反向请求。
     """
@@ -119,17 +115,23 @@ class _ClientHandler:
 
     async def request_permission(self, session_id: str, tool_call, options, **kwargs) -> "RequestPermissionResponse":
         title = getattr(tool_call, "title", "") or ""
-        prefix = "mcp__kb__"
-        if title.startswith(prefix) and title[len(prefix):] in _AUTO_ALLOW_TOOLS:
+        # 动态白名单（60s 缓存，权限应答热路径不逐次查库；DB 不可达时 fail-closed）
+        try:
+            async with AsyncSessionLocal() as session:
+                allowed = await get_auto_allow_tools(session)
+        except Exception:
+            logger.exception("dsh 权限应答：读取工具白名单失败，本次全部拒绝")
+            allowed = []
+        if is_auto_allowed(title, allowed):
             option_id = next(
                 (o.option_id for o in options if o.option_id == "allow-once"),
                 options[0].option_id if options else "allow-once",
             )
-            logger.info("dsh 权限应答：自动允许只读工具 %s", title)
+            logger.info("dsh 权限应答：自动允许工具 %s", title)
             return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=option_id))
         # 其余一律拒绝：优先 reject-once，没有该选项则取消（dsh 侧映射为 rejected/cancelled）
         reject_id = next((o.option_id for o in options if o.option_id == "reject-once"), None)
-        logger.warning("dsh 权限应答：拒绝工具 %s（仅放行只读白名单工具）", title)
+        logger.warning("dsh 权限应答：拒绝工具 %s（未在自动放行白名单）", title)
         if reject_id is not None:
             return RequestPermissionResponse(outcome=AllowedOutcome(outcome="selected", option_id=reject_id))
         return RequestPermissionResponse(outcome=DeniedOutcome(outcome="cancelled"))
