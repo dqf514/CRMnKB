@@ -289,7 +289,7 @@ import {
   User, UserFilled, List, SetUp, Collection, Avatar, ArrowDown, Bell, Notebook,
   Sunny, Moon, Files, MoreFilled, ArrowRight, Plus, Search, Fold, Expand,
   Setting, Cpu, DataAnalysis, Monitor, WarningFilled, Delete, Tickets, MagicStick, Connection,
-  Stamp, Back,
+  Stamp, Back, Grid,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { confirmDanger } from '../utils/confirmDanger'
@@ -358,6 +358,7 @@ const adminGroups = [
       { path: '/admin/llm/stats', label: '用量监控', icon: DataAnalysis },
       { path: '/admin/skills', label: 'Skill 管理', icon: MagicStick },
       { path: '/admin/mcp-servers', label: 'MCP Server', icon: Connection },
+      { path: '/admin/dsh-plugins', label: 'dsh 插件', icon: Grid },
     ],
   },
   {

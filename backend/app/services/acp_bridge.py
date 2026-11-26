@@ -307,6 +307,10 @@ class AcpBridge:
             if self._has_content(base_patch):
                 patches.append(str(base_patch))
             patches.append(str(self._write_process_patch(model_name)))
+            # 管理员插件覆盖层（管理端「dsh 插件」页维护）：最后加载，优先级最高
+            plugins_patch = self._patches_dir() / "plugins.yml"
+            if self._has_content(plugins_patch):
+                patches.append(str(plugins_patch))
             args = ["--profile", "acp"]
             for p in patches:
                 args += ["--patch", p]

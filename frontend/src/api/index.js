@@ -243,6 +243,13 @@ export const getLibraryFilePreviewPng = (id) =>
   request.get(`/api/v1/library/files/${id}/preview.png`, { responseType: 'blob', timeout: 120000 })
 // 解析切片预览（不支持在线预览的格式如有切片则展示切片内容）
 export const getLibraryFileChunks = (id) => request.get(`/api/v1/library/files/${id}/chunks`)
+
+// ========== 管理端：dsh 插件库 ==========
+export const getDshPlugins = () => request.get('/api/v1/admin/dsh-plugins')
+export const toggleDshPlugin = (id, enabled) => request.put(`/api/v1/admin/dsh-plugins/${encodeURIComponent(id)}`, { enabled })
+export const installDshPlugin = (spec) => request.post('/api/v1/admin/dsh-plugins/install', { spec }, { timeout: 600000 })
+export const removeDshCustomPlugin = (id) => request.delete(`/api/v1/admin/dsh-plugins/custom/${encodeURIComponent(id)}`)
+export const restartDsh = () => request.post('/api/v1/admin/dsh-plugins/restart')
 // PST 拆解进度（上传面板轮询）
 export const getPstProgress = (id) => request.get(`/api/v1/library/files/${id}/pst-progress`)
 export const updateLibraryFile = (id, data) => request.put(`/api/v1/library/files/${id}`, data)

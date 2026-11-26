@@ -120,7 +120,9 @@ dsh（DeepSeek Harness）作为 Agent 运行时被 FastAPI 内嵌管理：**单�
 | `DSH_AGENT_ENABLED` | `false` | 总开关；false 时 agent 端点 503、ACP 进程不启动 |
 | `DSH_BIN` | 空（**必填**） | dsh 可执行文件路径；Windows 必须指 `.cmd` shim |
 | `DSH_HOME` | `data/dsh/home` | dsh 运行时 home（profile/凭据/插件注册态） |
-| `DSH_PATCHES_DIR` | `data/dsh/patches` | 进程级 patch yml 目录（base.yml 静态 PG patch + acp-model.yml 自动生成） |
+| `DSH_PATCHES_DIR` | `data/dsh/patches` | 进程级 patch yml 目录（base.yml 静态 PG patch + acp-model.yml 自动生成 + plugins.yml 管理端插件覆盖层） |
+
+**dsh 插件库（管理端「AI 模型 → dsh 插件」）**：`services/dsh_plugins.py` + `api/admin_dsh_plugins.py`（`/admin/dsh-plugins`，仅硬超管）。插件清单来自 `dsh --profile acp --dump-config`（不含 --patch 层）；有效启停按优先级合并：plugins.yml（管理员覆盖）> acp-model.yml（进程级生成）> profile 树；`!!js` 表达式无法静态求值显示为"动态"。启停写入 plugins.yml（同 id 的 `disabled` 覆盖），安装经 `dsh plugin --profile acp add`（pnpm 必须在 PATH）并在 plugins.yml 追加 insert 条目加载（dsh plugin add 只装包不挂载）；两类改动保存后自动 `bridge.close_all()` 重建 dsh 进程生效（会话在 PG 不丢）。Windows 下子进程调 .cmd 须经 `cmd /c` 且输出按 UTF-8 解码（`text=True` 默认 GBK 会炸）。
 | `DSH_WORKSPACE_ROOT` | `data/dsh/workspace` | agent 会话工作目录（所有会话共用同一 cwd：session/resume 要求 cwd 一致） |
 | `DSH_MCP_URL` | `http://127.0.0.1:8100/api/mcp` | 注入 dsh 的知识库 MCP server 地址 |
 | `DSH_MCP_TOKEN_EXPIRE_MINUTES` | `10080`（7 天） | dsh 专用 MCP 令牌有效期；每次会话激活（session/new|resume）时新签，过期自动换发无需重建进程 |

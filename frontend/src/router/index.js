@@ -169,6 +169,12 @@ const routes = [
         meta: { title: 'MCP Server 管理', admin: true },
       },
       {
+        path: 'admin/dsh-plugins',
+        name: 'AdminDshPlugins',
+        component: () => import('../views/admin/DshPlugins.vue'),
+        meta: { title: 'dsh 插件', admin: true },
+      },
+      {
         path: 'admin/settings',
         name: 'AdminSettings',
         component: () => import('../views/admin/SystemSettings.vue'),

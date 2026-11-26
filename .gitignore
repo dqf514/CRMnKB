@@ -19,6 +19,7 @@ backend/data/dsh/home/
 backend/data/dsh/workspace/
 backend/data/dsh/patches/user_*.yml
 backend/data/dsh/patches/acp-model.yml
+backend/data/dsh/patches/plugins.yml
 
 # Node
 frontend/node_modules/
